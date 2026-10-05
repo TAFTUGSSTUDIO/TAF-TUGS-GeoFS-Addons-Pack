@@ -1,0 +1,249 @@
+// ==UserScript==
+// @name         GeoFS Precise Flight Callouts + Smart Gear Check
+// @namespace    https://geofs.callouts/
+// @version      1
+// @description  V1, Rotate, V2 takeoff, conditional Gear Up for retractables, 2500 landing callouts, and toggle for GeoFS
+// @author       Cleaned Script
+// @license      MIT
+// @match        https://www.geo-fs.com/geofs.php*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=geo-fs.com
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let audioUnlocked = false;
+    let calloutsEnabled = false;
+
+    function speak(text) {
+        if (!window.speechSynthesis || !audioUnlocked || !calloutsEnabled) return;
+
+        window.speechSynthesis.cancel();
+        let utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.05;
+        utterance.pitch = 1.0;
+
+        let voices = window.speechSynthesis.getVoices();
+        if (voices.length > 0) {
+            utterance.voice = voices[0];
+        }
+        window.speechSynthesis.speak(utterance);
+        console.log("[Callouts Spoken]: " + text);
+    }
+
+    // --- UI Button to Toggle Callouts ---
+    const observer = new MutationObserver(() => {
+        const menuList = document.querySelector('div.geofs-ui-bottom');
+        if (menuList && !document.getElementById('geofs-callouts-toggle')) {
+            const toggleBtn = document.createElement('button');
+            toggleBtn.id = 'geofs-callouts-toggle';
+            toggleBtn.className = 'mdl-button mdl-js-button mdl-button--raised mdl-button--colored';
+            toggleBtn.style.cssText = "margin-left: 10px; background-color: #d32f2f !important; color: white; font-weight: bold; font-size: 11px; z-index: 99999;";
+            toggleBtn.innerText = "🔇 Callouts: OFF";
+
+            toggleBtn.addEventListener('click', () => {
+                audioUnlocked = true;
+                calloutsEnabled = !calloutsEnabled;
+
+                if (calloutsEnabled) {
+                    toggleBtn.innerText = "🔊 Callouts: ON";
+                    toggleBtn.style.backgroundColor = "#43a047 !important";
+
+                    let testUtter = new SpeechSynthesisUtterance("Callouts enabled");
+                    window.speechSynthesis.speak(testUtter);
+                    console.log("[Callouts] Enabled by user.");
+                } else {
+                    window.speechSynthesis.cancel();
+                    toggleBtn.innerText = "🔇 Callouts: OFF";
+                    toggleBtn.style.backgroundColor = "#d32f2f !important";
+                    console.log("[Callouts] Disabled by user.");
+                }
+            });
+
+            menuList.appendChild(toggleBtn);
+        }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    let takeoffSequenceTriggered = false;
+    let airborneSequenceTriggered = false;
+    let airborneCounter = 0;
+    let hasReachedCruiseOrClimb = false;
+    let previousAlt = 0;
+    let lastAircraftName = "";
+
+    let calledAltitudes = {
+        2500: false, 1000: false, 500: false, 400: false,
+        300: false, 200: false, 100: false, 50: false,
+        40: false, 30: false, 20: false, 10: false, 5: false
+    };
+
+    let wasOnGround = true;
+
+    function getAircraftInfo() {
+        let geofsRef = window.geofs || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.geofs : null);
+        if (!geofsRef || !geofsRef.aircraft || !geofsRef.aircraft.instance) {
+            return { v1: 80, hasRetractableGear: true };
+        }
+
+        let instance = geofsRef.aircraft.instance;
+        let name = "";
+
+        if (instance.aircraftRecord && instance.aircraftRecord.name) {
+            name = instance.aircraftRecord.name.toLowerCase();
+        } else if (instance.id) {
+            name = instance.id.toString().toLowerCase();
+        }
+
+        if (name !== lastAircraftName) {
+            lastAircraftName = name;
+            console.log("[Callouts] Detected aircraft change: " + name);
+        }
+
+        // Determine V1 Speed
+        let v1 = 90;
+        if (name.includes("an-225") || name.includes("an225") || name.includes("mriya")) {
+            v1 = 160;
+        } else if (name.includes("747") || name.includes("a380") || name.includes("concorde") || name.includes("777")) {
+            v1 = 145;
+        } else if (name.includes("737") || name.includes("a320") || name.includes("a321") || name.includes("a319") || name.includes("erj") || name.includes("crj")) {
+            v1 = 120;
+        } else if (name.includes("f-16") || name.includes("f-18") || name.includes("f-22") || name.includes("f-35") || name.includes("alphajet") || name.includes("su-35")) {
+            v1 = 130;
+        } else if (name.includes("cub") || name.includes("cessna 152") || name.includes("beaver") || name.includes("glider") || name.includes("balloon")) {
+            v1 = 45;
+        } else if (name.includes("cessna") || name.includes("cherokee") || name.includes("twin otter") || name.includes("pc-7")) {
+            v1 = 65;
+        }
+
+        // Check if aircraft has fixed gear (no gear up callout)
+        let hasRetractableGear = true;
+        if (name.includes("cessna 152") || name.includes("cub") || name.includes("glider") || name.includes("balloon") || name.includes("beaver") || name.includes("cessna 172")) {
+            hasRetractableGear = false;
+        }
+
+        return { v1: v1, hasRetractableGear: hasRetractableGear };
+    }
+
+    // --- Main Monitoring Loop ---
+    setInterval(() => {
+        if (!audioUnlocked || !calloutsEnabled) return;
+
+        let geofsRef = window.geofs || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.geofs : null);
+        if (!geofsRef || !geofsRef.animation || !geofsRef.animation.values) {
+            return;
+        }
+
+        let v = geofsRef.animation.values;
+        let onGround = v.groundContact === 1;
+        let currentSpeed = v.kias || v.knots || v.speed || v.airspeed || 0;
+
+        let aircraftInfo = getAircraftInfo();
+        let dynamicV1 = aircraftInfo.v1;
+
+        let altAGL = 0;
+        if (v.altitude !== undefined && v.groundElevationFeet !== undefined) {
+            altAGL = v.altitude - v.groundElevationFeet;
+        } else {
+            altAGL = v.height || 0;
+        }
+
+        let isDescending = altAGL < previousAlt;
+        previousAlt = altAGL;
+
+        // --- TAKEOFF LOGIC ---
+        if (onGround) {
+            wasOnGround = true;
+            airborneCounter = 0;
+
+            if (currentSpeed < 15) {
+                hasReachedCruiseOrClimb = false;
+                takeoffSequenceTriggered = false;
+                airborneSequenceTriggered = false;
+            }
+
+            // Ground Roll & Initial Sequence
+            if (!hasReachedCruiseOrClimb && !takeoffSequenceTriggered && currentSpeed >= dynamicV1) {
+                takeoffSequenceTriggered = true;
+                console.log("[Callouts] Takeoff sequence started.");
+
+                // 1. V1 immediately
+                speak("V 1");
+
+                // 2. Rotate 1.5 seconds later
+                setTimeout(() => {
+                    if (onGround && !hasReachedCruiseOrClimb) {
+                        speak("Rotate");
+                    }
+                }, 1500);
+
+                // 3. V2 delayed by another 3 seconds (4.5 seconds total after V1)
+                setTimeout(() => {
+                    if (onGround && !hasReachedCruiseOrClimb) {
+                        speak("V 2");
+                    }
+                }, 4500);
+            }
+        } else {
+            airborneCounter++;
+            if (wasOnGround) {
+                wasOnGround = false;
+                resetLandingCallouts();
+            }
+
+            if (altAGL > 300) {
+                hasReachedCruiseOrClimb = true;
+            }
+
+            // Airborne Sequence: Handle Gear Up after 3.7 seconds ONLY if aircraft has retractable gear
+            if (!airborneSequenceTriggered) {
+                airborneSequenceTriggered = true;
+                console.log("[Callouts] Airborne climb phase detected.");
+
+                if (aircraftInfo.hasRetractableGear) {
+                    setTimeout(() => {
+                        speak("Gear up");
+                    }, 3700);
+                } else {
+                    console.log("[Callouts] Aircraft has fixed gear. Skipping 'Gear up' callout.");
+                }
+            }
+        }
+
+        // --- LANDING ALTITUDE CALLOUTS ---
+        if (!onGround && hasReachedCruiseOrClimb && isDescending && airborneCounter > 50 && altAGL <= 2550 && altAGL >= 0) {
+            checkAltitude(2500, altAGL, 50);
+            checkAltitude(1000, altAGL, 25);
+            checkAltitude(500, altAGL, 25);
+            checkAltitude(400, altAGL, 25);
+            checkAltitude(300, altAGL, 25);
+            checkAltitude(200, altAGL, 25);
+            checkAltitude(100, altAGL, 25);
+            checkAltitude(50, altAGL, 25);
+            checkAltitude(40, altAGL, 25);
+            checkAltitude(30, altAGL, 25);
+            checkAltitude(20, altAGL, 25);
+            checkAltitude(10, altAGL, 25);
+            checkAltitude(5, altAGL, 25);
+        }
+
+    }, 100);
+
+    function checkAltitude(target, currentAlt, buffer = 25) {
+        if (!calledAltitudes[target] && currentAlt <= target && currentAlt > (target - buffer)) {
+            speak(target.toString());
+            calledAltitudes[target] = true;
+        }
+        if (currentAlt > target + (buffer + 15)) {
+            calledAltitudes[target] = false;
+        }
+    }
+
+    function resetLandingCallouts() {
+        for (let alt in calledAltitudes) {
+            calledAltitudes[alt] = false;
+        }
+    }
+
+})();
