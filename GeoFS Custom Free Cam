@@ -1,0 +1,1142 @@
+// ==UserScript==
+// @name         GeoFS Custom Free Cam
+// @namespace    http://tampermonkey.net/
+// @version      1
+// @description  Custom 3D Free Camera. The chase cam button leaves free cam and switches to GeoFS chase cam.
+// @author       You
+// @match        https://geo-fs.com/geofs.php*
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://*.geo-fs.com/geofs.php*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ============================================================
+    // CONFIG
+    // ============================================================
+
+    const CONFIG = {
+        moveSpeed: 25,
+        fastMultiplier: 4,
+        slowMultiplier: 0.2,
+
+        mouseSensitivity: 0.003,
+
+        wheelSensitivity: 0.08,
+        minFOV: 0.15,
+        maxFOV: 2.5,
+
+        uiId: 'custom-geofs-freecam-ui'
+    };
+
+    // ============================================================
+    // MODES: OFF | FREE | CHASE
+    // ============================================================
+
+    let mode = 'OFF';
+
+    // ============================================================
+    // STATE
+    // ============================================================
+
+    let looking = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    let savedFOV = null;
+    let animationFrame = null;
+
+    // ============================================================
+    // KEY STATE
+    // ============================================================
+
+    const keys = {
+        shift: false,
+        ctrl: false,
+        up: false,
+        down: false,
+        left: false,
+        right: false,
+        w: false,
+        s: false
+    };
+
+    // ============================================================
+    // WAIT FOR GEOFS
+    // ============================================================
+
+    function waitForGeoFS() {
+
+        if (window.geofs && geofs.camera && geofs.api) {
+
+            console.log('[Custom Free Cam] GeoFS ready');
+
+            createUI();
+            installControls();
+            startLoop();
+
+        } else {
+
+            setTimeout(waitForGeoFS, 500);
+        }
+    }
+
+    // ============================================================
+    // HELPERS
+    // ============================================================
+
+    function getCamera() {
+        return geofs.camera.cam || geofs.api.camera || null;
+    }
+
+    function isUIElement(target) {
+        const ui = document.getElementById(CONFIG.uiId);
+        return ui && ui.contains(target);
+    }
+
+    function visible(element) {
+
+        if (!element) {
+            return false;
+        }
+
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+
+        return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            rect.width > 0 &&
+            rect.height > 0
+        );
+    }
+
+    // Finds a visible GeoFS menu element by its exact text.
+    function findElementByText(texts) {
+
+        const elements = document.querySelectorAll(
+            'button, a, li, div, span'
+        );
+
+        for (const element of elements) {
+
+            const text = (element.textContent || '')
+                .trim()
+                .toLowerCase();
+
+            if (texts.includes(text) && visible(element)) {
+                return element;
+            }
+        }
+
+        return null;
+    }
+
+    // ============================================================
+    // GEOFS FREE CAM
+    // ============================================================
+
+    function findFreeCamElement() {
+
+        const visibleOne = findElementByText(['free cam']);
+
+        if (visibleOne) {
+            return visibleOne;
+        }
+
+        // Fallback: hidden elements too.
+        const elements = document.querySelectorAll(
+            'button, a, li, div, span'
+        );
+
+        for (const element of elements) {
+
+            const text = (element.textContent || '')
+                .trim()
+                .toLowerCase();
+
+            if (text === 'free cam') {
+                return element;
+            }
+        }
+
+        return null;
+    }
+
+    function activateGeoFSFreeCam() {
+
+        const camera = getCamera();
+
+        if (!camera) {
+            console.warn('[Custom Free Cam] Camera not available');
+            return false;
+        }
+
+        console.log('[Custom Free Cam] Activating GeoFS Free Cam');
+
+        const freeButton = findFreeCamElement();
+
+        if (freeButton) {
+
+            try {
+                freeButton.click();
+            } catch (e) {
+                console.warn(
+                    '[Custom Free Cam] Could not click Free Cam',
+                    e
+                );
+            }
+        }
+
+        try {
+
+            const modes = geofs.camera.modes;
+
+            if (Array.isArray(modes)) {
+
+                let freeIndex = -1;
+                let freeMode = null;
+
+                for (let i = 0; i < modes.length; i++) {
+
+                    const m = modes[i];
+
+                    if (!m) {
+                        continue;
+                    }
+
+                    const name = (m.name || m.view || '')
+                        .toString()
+                        .toLowerCase();
+
+                    if (name.includes('free')) {
+                        freeIndex = i;
+                        freeMode = m;
+                        break;
+                    }
+                }
+
+                if (
+                    freeIndex !== -1 &&
+                    typeof geofs.camera.set === 'function'
+                ) {
+
+                    try { geofs.camera.set(freeIndex); } catch (e) {}
+                    try { geofs.camera.set(freeMode); } catch (e) {}
+                }
+            }
+
+        } catch (e) {}
+
+        return true;
+    }
+
+    function isGeoFSFreeCam() {
+
+        try {
+            return (geofs.camera.currentModeName || '')
+                .toString()
+                .toLowerCase()
+                .includes('free');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // ============================================================
+    // GEOFS CHASE CAM
+    // ============================================================
+
+    function findChaseCamIndex() {
+
+        const lists = [
+            geofs.camera.modes,
+            geofs.camera.names,
+            geofs.camera.cameraNames
+        ];
+
+        for (const list of lists) {
+
+            if (!Array.isArray(list)) {
+                continue;
+            }
+
+            for (let i = 0; i < list.length; i++) {
+
+                const entry = list[i];
+
+                const name = (
+                    typeof entry === 'string'
+                        ? entry
+                        : (entry && (entry.name || entry.view)) || ''
+                ).toString().toLowerCase();
+
+                if (name.includes('chase')) {
+                    return i;
+                }
+            }
+        }
+
+        // GeoFS default order: cockpit, chase, ...
+        return 1;
+    }
+
+    function clickChaseCamElement() {
+
+        const element = findElementByText(['chase cam', 'chase']);
+
+        if (element) {
+
+            try {
+                element.click();
+                return true;
+            } catch (e) {}
+        }
+
+        return false;
+    }
+
+    function isChaseCam() {
+
+        try {
+            return (geofs.camera.currentModeName || '')
+                .toString()
+                .toLowerCase()
+                .includes('chase');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // ============================================================
+    // CLEAR KEYS / STOP LOOKING
+    // ============================================================
+
+    function clearKeys() {
+
+        keys.shift = false;
+        keys.ctrl = false;
+        keys.up = false;
+        keys.down = false;
+        keys.left = false;
+        keys.right = false;
+        keys.w = false;
+        keys.s = false;
+    }
+
+    function stopLooking() {
+
+        looking = false;
+        lastMouseX = 0;
+        lastMouseY = 0;
+    }
+
+    // ============================================================
+    // ENABLE FREE CAM
+    // ============================================================
+
+    function enableFreeCam() {
+
+        if (mode === 'FREE') {
+            disableEverything();
+            return;
+        }
+
+        const camera = getCamera();
+
+        if (!camera) {
+            console.warn('[Custom Free Cam] Camera not found');
+            return;
+        }
+
+        try {
+            savedFOV = geofs.api.getFOV(camera);
+        } catch (e) {
+            savedFOV = null;
+        }
+
+        clearKeys();
+        stopLooking();
+
+        activateGeoFSFreeCam();
+
+        setTimeout(() => {
+
+            if (!isGeoFSFreeCam()) {
+                activateGeoFSFreeCam();
+            }
+
+            setTimeout(() => {
+
+                mode = 'FREE';
+
+                clearKeys();
+                stopLooking();
+
+                updateUI();
+
+                console.log('[Custom Free Cam] FREE CAM ACTIVE');
+
+            }, 150);
+
+        }, 150);
+    }
+
+    // ============================================================
+    // RESTORE NORMAL GEOFS CAMERA
+    // ============================================================
+
+    function restoreNormalCamera() {
+
+        try {
+            if (
+                geofs.camera &&
+                typeof geofs.camera.setToNeutral === 'function'
+            ) {
+                geofs.camera.setToNeutral();
+            }
+        } catch (e) {}
+
+        try {
+            if (
+                geofs.camera &&
+                typeof geofs.camera.update === 'function'
+            ) {
+                geofs.camera.update(2);
+            }
+        } catch (e) {}
+
+        try {
+            if (
+                savedFOV !== null &&
+                geofs.api &&
+                typeof geofs.api.setFOV === 'function'
+            ) {
+                const camera = getCamera();
+
+                if (camera) {
+                    geofs.api.setFOV(camera, savedFOV);
+                }
+            }
+        } catch (e) {}
+    }
+
+    // ============================================================
+    // KEYBOARD FOCUS
+    // ============================================================
+
+    function restoreGeoFSKeyboardFocus() {
+
+        try {
+            if (
+                document.activeElement &&
+                typeof document.activeElement.blur === 'function'
+            ) {
+                document.activeElement.blur();
+            }
+        } catch (e) {}
+
+        let canvas =
+            document.querySelector('#cesiumContainer canvas') ||
+            document.querySelector('.cesium-widget canvas') ||
+            document.querySelector('canvas');
+
+        if (canvas) {
+
+            try {
+                canvas.setAttribute('tabindex', '0');
+                canvas.focus();
+            } catch (e) {}
+        }
+
+        const container = document.getElementById('cesiumContainer');
+
+        if (container) {
+
+            try {
+                container.setAttribute('tabindex', '0');
+                container.focus();
+            } catch (e) {}
+        }
+
+        if (canvas) {
+
+            setTimeout(() => {
+                try { canvas.focus(); } catch (e) {}
+            }, 50);
+        }
+    }
+
+    // ============================================================
+    // SIT / FOCUS PLANE -> SWITCH TO CHASE CAM
+    // ============================================================
+
+    function sitAndFocusPlane() {
+
+        if (mode !== 'FREE') {
+            return;
+        }
+
+        // Leave our custom free cam and enter chase mode.
+        // (F8 from here goes back to free cam.)
+        mode = 'CHASE';
+
+        clearKeys();
+        stopLooking();
+
+        updateUI();
+
+        // Reset camera state, then switch to chase cam.
+        restoreNormalCamera();
+
+        setTimeout(() => {
+
+            let switched = false;
+
+            try {
+
+                if (
+                    geofs.camera &&
+                    typeof geofs.camera.set === 'function'
+                ) {
+                    geofs.camera.set(findChaseCamIndex());
+                    switched = true;
+                }
+
+            } catch (e) {
+                console.warn(
+                    '[Custom Free Cam] camera.set failed:',
+                    e
+                );
+            }
+
+            // Fallback: click the chase cam option in the GeoFS UI.
+            if (!switched || !isChaseCam()) {
+                clickChaseCamElement();
+            }
+
+            restoreGeoFSKeyboardFocus();
+
+            console.log('[Custom Free Cam] Switched to Chase Cam');
+
+        }, 150);
+    }
+
+    // ============================================================
+    // MOVE CAMERA
+    // ============================================================
+
+    function moveCamera(direction, amount) {
+
+        if (mode !== 'FREE') {
+            return;
+        }
+
+        const camera = getCamera();
+
+        if (!camera) {
+            return;
+        }
+
+        try {
+
+            switch (direction) {
+
+                case 'forward':
+                    if (typeof camera.moveForward === 'function') {
+                        camera.moveForward(amount);
+                    }
+                    break;
+
+                case 'back':
+                    if (typeof camera.moveBackward === 'function') {
+                        camera.moveBackward(amount);
+                    } else if (typeof camera.moveForward === 'function') {
+                        camera.moveForward(-amount);
+                    }
+                    break;
+
+                case 'left':
+                    if (typeof camera.moveLeft === 'function') {
+                        camera.moveLeft(amount);
+                    }
+                    break;
+
+                case 'right':
+                    if (typeof camera.moveRight === 'function') {
+                        camera.moveRight(amount);
+                    }
+                    break;
+
+                case 'up':
+                    if (typeof camera.moveUp === 'function') {
+                        camera.moveUp(amount);
+                    }
+                    break;
+
+                case 'down':
+                    if (typeof camera.moveDown === 'function') {
+                        camera.moveDown(amount);
+                    }
+                    break;
+            }
+
+        } catch (e) {}
+    }
+
+    function getMovementSpeed() {
+
+        let speed = CONFIG.moveSpeed;
+
+        if (keys.shift) {
+            speed *= CONFIG.fastMultiplier;
+        }
+
+        if (keys.ctrl) {
+            speed *= CONFIG.slowMultiplier;
+        }
+
+        return speed;
+    }
+
+    // ============================================================
+    // CONTROLS
+    // ============================================================
+
+    function installControls() {
+
+        // ---------------- KEY DOWN ----------------
+
+        document.addEventListener(
+            'keydown',
+            function (event) {
+
+                if (event.key === 'F8') {
+
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    if (mode === 'FREE') {
+                        disableEverything();
+                    } else {
+                        // OFF or CHASE -> free cam
+                        enableFreeCam();
+                    }
+
+                    return;
+                }
+
+                // Only intercept keys while in free cam.
+                if (mode !== 'FREE') {
+                    return;
+                }
+
+                switch (event.key) {
+
+                    case 'Shift':
+                        keys.shift = true;
+                        break;
+
+                    case 'Control':
+                        keys.ctrl = true;
+                        break;
+
+                    case 'ArrowUp':
+                        keys.up = true;
+                        break;
+
+                    case 'ArrowDown':
+                        keys.down = true;
+                        break;
+
+                    case 'ArrowLeft':
+                        keys.left = true;
+                        break;
+
+                    case 'ArrowRight':
+                        keys.right = true;
+                        break;
+
+                    case 'w':
+                    case 'W':
+                        keys.w = true;
+                        break;
+
+                    case 's':
+                    case 'S':
+                        keys.s = true;
+                        break;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+
+            },
+            true
+        );
+
+        // ---------------- KEY UP ----------------
+
+        document.addEventListener(
+            'keyup',
+            function (event) {
+
+                if (mode !== 'FREE') {
+                    return;
+                }
+
+                switch (event.key) {
+
+                    case 'Shift':
+                        keys.shift = false;
+                        break;
+
+                    case 'Control':
+                        keys.ctrl = false;
+                        break;
+
+                    case 'ArrowUp':
+                        keys.up = false;
+                        break;
+
+                    case 'ArrowDown':
+                        keys.down = false;
+                        break;
+
+                    case 'ArrowLeft':
+                        keys.left = false;
+                        break;
+
+                    case 'ArrowRight':
+                        keys.right = false;
+                        break;
+
+                    case 'w':
+                    case 'W':
+                        keys.w = false;
+                        break;
+
+                    case 's':
+                    case 'S':
+                        keys.s = false;
+                        break;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+
+            },
+            true
+        );
+
+        // ---------------- MOUSE DOWN ----------------
+
+        document.addEventListener(
+            'mousedown',
+            function (event) {
+
+                if (mode !== 'FREE') {
+                    stopLooking();
+                    return;
+                }
+
+                if (isUIElement(event.target)) {
+                    stopLooking();
+                    return;
+                }
+
+                if (event.button !== 0) {
+                    return;
+                }
+
+                looking = true;
+                lastMouseX = event.clientX;
+                lastMouseY = event.clientY;
+
+                event.preventDefault();
+                event.stopPropagation();
+
+            },
+            true
+        );
+
+        // ---------------- MOUSE / POINTER UP ----------------
+
+        document.addEventListener(
+            'mouseup',
+            function (event) {
+                if (event.button === 0) {
+                    stopLooking();
+                }
+            },
+            true
+        );
+
+        document.addEventListener(
+            'pointerup',
+            function (event) {
+                if (event.button === 0) {
+                    stopLooking();
+                }
+            },
+            true
+        );
+
+        document.addEventListener(
+            'pointercancel',
+            function () {
+                stopLooking();
+            },
+            true
+        );
+
+        // ---------------- BLUR / VISIBILITY ----------------
+
+        window.addEventListener('blur', function () {
+            stopLooking();
+            clearKeys();
+        });
+
+        document.addEventListener('visibilitychange', function () {
+
+            if (document.hidden) {
+                stopLooking();
+                clearKeys();
+            }
+        });
+
+        // ---------------- MOUSE MOVE ----------------
+
+        document.addEventListener(
+            'mousemove',
+            function (event) {
+
+                if (mode !== 'FREE') {
+                    return;
+                }
+
+                // Physical LMB state.
+                if ((event.buttons & 1) === 0) {
+                    stopLooking();
+                    return;
+                }
+
+                if (!looking) {
+                    return;
+                }
+
+                if (isUIElement(event.target)) {
+                    stopLooking();
+                    return;
+                }
+
+                const dx = event.clientX - lastMouseX;
+                const dy = event.clientY - lastMouseY;
+
+                lastMouseX = event.clientX;
+                lastMouseY = event.clientY;
+
+                const camera = getCamera();
+
+                if (!camera) {
+                    stopLooking();
+                    return;
+                }
+
+                try {
+
+                    if (typeof camera.lookRight === 'function') {
+                        camera.lookRight(-dx * CONFIG.mouseSensitivity);
+                    }
+
+                    if (typeof camera.lookUp === 'function') {
+                        camera.lookUp(-dy * CONFIG.mouseSensitivity);
+                    }
+
+                } catch (e) {}
+
+                event.preventDefault();
+                event.stopPropagation();
+
+            },
+            true
+        );
+
+        // ---------------- MOUSE WHEEL ----------------
+
+        document.addEventListener(
+            'wheel',
+            function (event) {
+
+                if (mode !== 'FREE') {
+                    return;
+                }
+
+                if (isUIElement(event.target)) {
+                    return;
+                }
+
+                const camera = getCamera();
+
+                if (!camera) {
+                    return;
+                }
+
+                try {
+
+                    let fov = geofs.api.getFOV(camera);
+
+                    fov += event.deltaY * CONFIG.wheelSensitivity / 100;
+
+                    fov = Math.max(
+                        CONFIG.minFOV,
+                        Math.min(CONFIG.maxFOV, fov)
+                    );
+
+                    geofs.api.setFOV(camera, fov);
+
+                } catch (e) {}
+
+                event.preventDefault();
+                event.stopPropagation();
+
+            },
+            { capture: true, passive: false }
+        );
+    }
+
+    // ============================================================
+    // DISABLE EVERYTHING (RETURN TO NORMAL CAMERA)
+    // ============================================================
+
+    function disableEverything() {
+
+        mode = 'OFF';
+
+        clearKeys();
+        stopLooking();
+
+        updateUI();
+
+        restoreNormalCamera();
+
+        setTimeout(restoreGeoFSKeyboardFocus, 100);
+
+        console.log('[Custom Free Cam] OFF');
+    }
+
+    // ============================================================
+    // CREATE UI
+    // ============================================================
+
+    function createUI() {
+
+        if (document.getElementById(CONFIG.uiId)) {
+            return;
+        }
+
+        const ui = document.createElement('div');
+
+        ui.id = CONFIG.uiId;
+
+        ui.innerHTML = `
+            <div id="custom-freecam-title">Custom Free Cam</div>
+
+            <div id="custom-freecam-status">OFF</div>
+
+            <div id="custom-freecam-controls">
+                <div>↑ ↓ ← → &nbsp; Move</div>
+                <div>W / S &nbsp; Up / Down</div>
+                <div>Hold LMB &nbsp; Look around</div>
+                <div>Mouse Wheel &nbsp; Zoom</div>
+                <div>SHIFT &nbsp; Fast</div>
+                <div>CTRL &nbsp; Precision</div>
+            </div>
+
+            <button id="custom-freecam-sit">CHASE CAM</button>
+
+            <button id="custom-freecam-exit">RETURN TO PLANE</button>
+        `;
+
+        const style = document.createElement('style');
+
+        style.textContent = `
+            #${CONFIG.uiId} {
+                position: fixed;
+                top: 18px;
+                left: 18px;
+                width: 235px;
+                padding: 14px;
+                background: rgba(0, 0, 0, 0.82);
+                color: white;
+                font-family: Arial, sans-serif;
+                font-size: 13px;
+                z-index: 999999;
+                border-radius: 8px;
+                box-shadow: 0 3px 14px rgba(0,0,0,0.45);
+                display: none;
+                user-select: none;
+            }
+
+            #custom-freecam-title {
+                font-size: 17px;
+                font-weight: bold;
+                margin-bottom: 6px;
+            }
+
+            #custom-freecam-status {
+                font-size: 11px;
+                font-weight: bold;
+                margin-bottom: 10px;
+                padding: 4px 6px;
+                background: rgba(50,50,50,0.85);
+                border-radius: 4px;
+            }
+
+            #custom-freecam-controls {
+                line-height: 1.65;
+                color: #eeeeee;
+                margin-bottom: 12px;
+            }
+
+            #custom-freecam-sit,
+            #custom-freecam-exit {
+                width: 100%;
+                border: none;
+                border-radius: 5px;
+                padding: 9px;
+                margin-top: 6px;
+                font-weight: bold;
+                cursor: pointer;
+                color: white;
+            }
+
+            #custom-freecam-sit { background: #2e7d32; }
+            #custom-freecam-sit:hover { background: #388e3c; }
+
+            #custom-freecam-exit { background: #b71c1c; }
+            #custom-freecam-exit:hover { background: #c62828; }
+        `;
+
+        document.head.appendChild(style);
+        document.body.appendChild(ui);
+
+        // CHASE CAM button (formerly SIT / FOCUS PLANE)
+        document
+            .getElementById('custom-freecam-sit')
+            .addEventListener('click', function (event) {
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                stopLooking();
+                clearKeys();
+
+                sitAndFocusPlane();
+            });
+
+        // RETURN button
+        document
+            .getElementById('custom-freecam-exit')
+            .addEventListener('click', function (event) {
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                stopLooking();
+                clearKeys();
+
+                disableEverything();
+            });
+    }
+
+    // ============================================================
+    // UPDATE UI
+    // ============================================================
+
+    function updateUI() {
+
+        const ui = document.getElementById(CONFIG.uiId);
+
+        if (!ui) {
+            return;
+        }
+
+        const status = document.getElementById('custom-freecam-status');
+        const controls = document.getElementById('custom-freecam-controls');
+        const chaseButton = document.getElementById('custom-freecam-sit');
+
+        if (mode === 'OFF') {
+            ui.style.display = 'none';
+            return;
+        }
+
+        ui.style.display = 'block';
+
+        if (mode === 'FREE') {
+            status.textContent = 'FREE CAM ACTIVE';
+            status.style.background = 'rgba(46,125,50,0.9)';
+            controls.style.display = 'block';
+            chaseButton.style.display = 'block';
+            return;
+        }
+
+        if (mode === 'CHASE') {
+            status.textContent = 'CHASE CAM - press F8 for Free Cam';
+            status.style.background = 'rgba(25,118,210,0.9)';
+            controls.style.display = 'none';
+            chaseButton.style.display = 'none';
+        }
+    }
+
+    // ============================================================
+    // FREE CAMERA MOVEMENT
+    // ============================================================
+
+    function updateMovement() {
+
+        if (mode !== 'FREE') {
+            return;
+        }
+
+        const distance = getMovementSpeed() * Math.min(0.05, 1 / 60);
+
+        if (keys.up) moveCamera('forward', distance);
+        if (keys.down) moveCamera('back', distance);
+        if (keys.left) moveCamera('left', distance);
+        if (keys.right) moveCamera('right', distance);
+        if (keys.w) moveCamera('up', distance);
+        if (keys.s) moveCamera('down', distance);
+    }
+
+    // ============================================================
+    // MAIN LOOP
+    // ============================================================
+
+    function frameLoop() {
+
+        animationFrame = requestAnimationFrame(frameLoop);
+
+        if (mode === 'FREE') {
+            updateMovement();
+        }
+    }
+
+    function startLoop() {
+
+        if (animationFrame) {
+            cancelAnimationFrame(animationFrame);
+        }
+
+        animationFrame = requestAnimationFrame(frameLoop);
+    }
+
+    // ============================================================
+    // START
+    // ============================================================
+
+    waitForGeoFS();
+
+})();
