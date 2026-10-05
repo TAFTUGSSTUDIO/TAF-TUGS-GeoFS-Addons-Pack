@@ -1,0 +1,3706 @@
+// ==UserScript==
+// @name         GeoFS Pushback Planner
+// @namespace    GeoFS-Pushback
+// @version      1
+// @description  Top-down pushback / pull-forward planner: multiple stops, speed control, saved plans per airport, orbit / wing / cockpit cameras, ghost plane preview that matches the aircraft you fly. Works on GeoFS 3.9 and 4.0 (beta).
+// @author       You
+// @match        https://*.geo-fs.com/*
+// @match        https://geo-fs.com/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+"use strict";
+
+console.log("[Y Pushback] Starting v10.0...");
+
+// ============================================================
+// SETTINGS
+// ============================================================
+
+const PUSHBACK_SPEED = 2.2;          // m/s default speed (adjustable with + / - or the buttons)
+const AUTO_PARKING_BRAKE = true;     // set the parking brake when the pushback / pull finishes or is stopped
+const SPEED_MIN = 0.5;               // m/s lowest selectable speed
+const SPEED_MAX = 6.0;               // m/s highest selectable speed
+const SPEED_STEP = 0.5;              // m/s per press
+const ACCELERATION = 0.4;            // m/s^2 (gentle start)
+const DECELERATION = 0.6;            // m/s^2 (gentle slow-down)
+const STOP_DISTANCE = 1.5;           // m
+const BRAKE_DECEL = 0.7;             // m/s^2 comfortable braking before every stop (lower = longer, gentler stop)
+const CREEP_SPEED = 0.25;            // m/s slowest speed while arriving at a stop
+const VELOCITY_SMOOTH_S = 0.9;       // seconds: how softly speed / direction changes are blended (higher = smoother)
+const YAW_TARGET_SMOOTH_S = 1.2;     // seconds: how softly the wanted nose direction is blended
+const MAX_YAW_ACCEL = 0.08;          // rad/s^2 how fast the turning rate may change
+const PURSUIT_SPEED_FACTOR = 2.5;    // look-ahead grows with speed (seconds of travel)
+const SLOW_DISTANCE = 15;            // m, minimum distance to start slowing before every stop
+const MAX_PLANNER_DISTANCE = 250;    // m, max distance of one stop from the previous one
+const MAX_LATERAL_ANGLE = 100;       // deg from straight-back (or straight-ahead when pulling forward)
+const WAYPOINT_PAUSE_S = 2;          // seconds the plane waits at each intermediate stop
+
+// Size of the on-screen panels (1 = old size, smaller = smaller UI).
+const UI_SCALE = 0.7;
+
+// Camera smoothing while moving (seconds, 0 = locked hard to the aircraft).
+const CAMERA_SMOOTH_S = 0.18;
+
+// Top view camera height above the aircraft (mouse wheel zooms).
+const CAMERA_HEIGHT_DEFAULT = 220;
+const CAMERA_HEIGHT_MIN = 20;
+const CAMERA_HEIGHT_MAX = 1500;
+const ZOOM_STEP = 1.25;              // factor per zoom button / key press
+
+// ------------------------------------------------------------
+// AIRCRAFT LIST (ghost plane image + real length)
+// ------------------------------------------------------------
+// The script reads the name of the aircraft you are flying and picks the
+// matching row below (first match wins, so specific variants come first).
+//   re     = pattern tested against the aircraft name (lower case, only letters+digits,
+//            e.g. "Boeing 737-800" -> "boeing737800")
+//   length = real nose-to-tail length in metres. The image is scaled so the
+//            AIRCRAFT ITSELF (transparent / plain background cropped away)
+//            is exactly this long on the ground.
+//   day / night = texture file names (after the IMG base URL)
+//   nose   = optional, which way the nose points in that image (0 up, 90 right, 180 down, 270 left)
+const IMG = "https://6a9f4f89b9f3f1e956cba77c.imgix.net/sandbox/";
+
+const T737_100 = { day: "Boeing_737-100.png", night: "Boeing_737-100%20-%20Copy.png" };
+const T737_400 = { day: "Boeing_737-400_v1.0.png", night: "Boeing_737-400_v1.0%20-%20Copy.png" };
+const T747 = { day: "Boeing_747-400_3view.svg.png", night: "Boeing_747-400_3view.svg%20-%20Copy.png" };
+const T747SP = { day: "612c620dae6ec10fb26874496920b012.png", night: "612c620dae6ec10fb26874496920b012%20-%20Copy.png" };
+const T757 = { day: "Boeing_757_family_v1.0.png", night: "Boeing_757_family_v1.0%20-%20Copy.png" };
+const T767 = { day: "B763_3D.png", night: "B763_3D%20-%20Copy.png" };
+const T777 = {
+    day: "dcf37d3da1900687fe30fa47d36e30a7_51ae7ffac2dbc4906bfd875bf33cb413.png",
+    night: "dcf37d3da1900687fe30fa47d36e30a7_51ae7ffac2dbc4906bfd875bf33cb413%20-%20Copy.png"
+};
+const T787 = {
+    day: "2d01f27ee1c8d80ee56c7c35cf543772_4fa8233523e92f2df4526c50d6a6dae3%20-%20Copy.png",
+    night: "2d01f27ee1c8d80ee56c7c35cf543772_4fa8233523e92f2df4526c50d6a6dae3%20-%20Copy%20-%20Copy.png"
+};
+const TA318 = { day: "Airbus_A318_v1.0.png", night: "Airbus_A318_v1.0%20-%20Copy.png" };
+const TA319 = { day: "as.png", night: "images%20(5)%20-%20Copy.png" };
+const TA320 = { day: "e.png", night: "sd.png" };
+const TA321 = { day: "A321_3D.png", night: "A321_3D%20-%20Copy.png" };
+const TA330 = { day: "Airbus_A330_family_v1.1.png", night: "Airbus_A330_family_v1.1%20-%20Copy.png" };
+const TA340 = { day: "Airbus_A340_family_v1.1.png", night: "Airbus_A340_family_v1.1%20-%20Copy.png" };
+const TA350 = { day: "a350_schem_01.png", night: "a350_schem_01%20-%20Copy.png" };
+const TA380 = { day: "d14bc8d87095d236ad523735a39c2664.png", night: "d14bc8d87095d236ad523735a39c2664%20-%20Copy.png" };
+const TCONC = { day: "b9d472_3be269425e8e454894719645c8af0e05.png", night: "b9d472_3be269425e8e454894719645c8af0e05%20-%20Copy.png" };
+
+const AIRCRAFT_SPECS = [
+    // ---- Boeing 747 ----
+    { re: /747sp/,              label: "Boeing 747SP",   length: 56.3, tex: T747SP },
+    { re: /7478/,               label: "Boeing 747-8",   length: 76.3, tex: T747 },
+    { re: /747/,                label: "Boeing 747-400", length: 70.7, tex: T747 },
+
+    // ---- Boeing 737 (100/200 use the old-style image, everything else the 400 image) ----
+    { re: /737.*max.*10/,       label: "Boeing 737 MAX 10", length: 43.8, tex: T737_400 },
+    { re: /737.*max.*9/,        label: "Boeing 737 MAX 9",  length: 42.2, tex: T737_400 },
+    { re: /737.*max.*7/,        label: "Boeing 737 MAX 7",  length: 35.6, tex: T737_400 },
+    { re: /737.*max|max.*737/,  label: "Boeing 737 MAX 8",  length: 39.5, tex: T737_400 },
+    { re: /737-?100/,           label: "Boeing 737-100",    length: 28.6, tex: T737_100 },
+    { re: /737-?200/,           label: "Boeing 737-200",    length: 30.5, tex: T737_100 },
+    { re: /737-?300/,           label: "Boeing 737-300",    length: 33.4, tex: T737_400 },
+    { re: /737-?400/,           label: "Boeing 737-400",    length: 36.4, tex: T737_400 },
+    { re: /737-?500/,           label: "Boeing 737-500",    length: 31.0, tex: T737_400 },
+    { re: /737-?600/,           label: "Boeing 737-600",    length: 31.2, tex: T737_400 },
+    { re: /737-?700/,           label: "Boeing 737-700",    length: 33.6, tex: T737_400 },
+    { re: /737-?800/,           label: "Boeing 737-800",    length: 39.5, tex: T737_400 },
+    { re: /737-?900/,           label: "Boeing 737-900",    length: 42.1, tex: T737_400 },
+    { re: /737/,                label: "Boeing 737",        length: 39.5, tex: T737_400 },
+
+    // ---- Boeing 757 / 767 / 777 / 787 ----
+    { re: /757-?300/,           label: "Boeing 757-300", length: 54.4, tex: T757 },
+    { re: /757/,                label: "Boeing 757-200", length: 47.3, tex: T757 },
+    { re: /767-?200/,           label: "Boeing 767-200", length: 48.5, tex: T767 },
+    { re: /767-?400/,           label: "Boeing 767-400", length: 61.4, tex: T767 },
+    { re: /767/,                label: "Boeing 767-300", length: 54.9, tex: T767 },
+    { re: /777-?200|777f/,      label: "Boeing 777-200", length: 63.7, tex: T777 },
+    { re: /777/,                label: "Boeing 777-300", length: 73.9, tex: T777 },
+    { re: /787-?10/,            label: "Boeing 787-10",  length: 68.3, tex: T787 },
+    { re: /787-?8/,             label: "Boeing 787-8",   length: 56.7, tex: T787 },
+    { re: /787/,                label: "Boeing 787-9",   length: 62.8, tex: T787 },
+
+    // ---- Airbus ----
+    { re: /a318/,               label: "Airbus A318", length: 31.4, tex: TA318 },
+    { re: /a319/,               label: "Airbus A319", length: 33.8, tex: TA319 },
+    { re: /a320/,               label: "Airbus A320", length: 37.6, tex: TA320 },
+    { re: /a321/,               label: "Airbus A321", length: 44.5, tex: TA321 },
+    { re: /a330-?200|a332/,     label: "Airbus A330-200", length: 58.8, tex: TA330 },
+    { re: /a330/,               label: "Airbus A330-300", length: 63.7, tex: TA330 },
+    { re: /a340-?600/,          label: "Airbus A340-600", length: 75.4, tex: TA340 },
+    { re: /a340-?500/,          label: "Airbus A340-500", length: 67.9, tex: TA340 },
+    { re: /a340-?200/,          label: "Airbus A340-200", length: 59.4, tex: TA340 },
+    { re: /a340/,               label: "Airbus A340-300", length: 63.7, tex: TA340 },
+    { re: /a350-?1000/,         label: "Airbus A350-1000", length: 73.8, tex: TA350 },
+    { re: /a350/,               label: "Airbus A350-900",  length: 66.8, tex: TA350 },
+    { re: /a380/,               label: "Airbus A380",      length: 72.7, tex: TA380 },
+
+    // ---- Concorde ----
+    { re: /concorde/,           label: "Concorde", length: 62.1, tex: TCONC }
+];
+
+// Used when the aircraft is not in the list above: a plain silhouette of this length.
+const PLANE_LENGTH_M = 30;
+
+// Default direction of the nose in the texture images:
+//   0 = up, 90 = right, 180 = down, 270 = left
+const PLANE_TEXTURE_NOSE_DEG = 0;
+
+// Image cropping: the images have empty margins, so the script finds the
+// outline of the aircraft inside the image and scales THAT to the real length.
+const CROP_ALPHA_MIN = 24;           // pixel counts as aircraft if alpha >= this (transparent images)
+const CROP_COLOR_DIFF = 40;          // ... or if its colour differs from the corner colour by more than this (opaque images)
+const CROP_ANALYSE_SIZE = 700;       // images are shrunk to this size for the analysis
+
+// Collision check: ghost planes (and the route) turn RED when the aircraft's
+// footprint would touch a building, vehicle, another aircraft or similar.
+const COLLISION_CHECK = true;
+const COLLISION_OBSTACLE_HEIGHT_M = 2.5;   // anything taller than this above the ground counts as an obstacle
+const COLLISION_SPAN_RATIO = 0.9;          // wingspan estimate = length x this
+const COLLISION_MARGIN_M = 1.5;            // safety margin around the aircraft
+const COLLISION_PATH_STEP_M = 14;          // also check the aircraft every this many metres along the route
+const COLLISION_MP_EXTRA_M = 12;           // other online aircraft: counts as a hit within (half our length + this)
+const COLLISION_FRAME_BUDGET_MS = 6;       // max time per frame spent on the check (keeps the game smooth)
+
+// Look of the planner overlay.
+//   "texture" = the day / night pictures from the list above, coloured yellow / green / red
+//   "outline" = a flat outline of an aircraft instead (also used if a picture can't load)
+const GHOST_STYLE = "texture";
+const TEXTURE_TINT_ALPHA = 0.55;   // how strongly the picture is coloured (0 = no colour, 1 = solid colour)
+const COLOR_ROUTE = "#000095";      // blue: centre line of the route
+const COLOR_WINGTIP = "#C063B5";    // purple: paths of the two wingtips
+const COLOR_PLACING = "#D1D36D";    // yellow: aircraft while you are placing it
+const COLOR_PLACED = "#68C85E";     // green: aircraft once the stop is placed
+const COLOR_BLOCKED = "#B03D2D";    // red: something is in the way
+const OUTLINE_FILL_ALPHA = 0.14;    // how much the outline is tinted inside (0 = empty outline)
+const SHOW_HEADING_AXIS = true;     // green / red line through the aircraft you are placing (nose / tail)
+
+// Sun height (dot product with local "up") below which it counts as night.
+const NIGHT_SUN_THRESHOLD = -0.05;
+
+// Route shape: go STRAIGHT first, then curve into the target, then run STRAIGHT into the stop.
+const STRAIGHT_FRACTION = 0.6;
+const STRAIGHT_MAX = 45;
+const STRAIGHT_MIN_DISTANCE = 6;
+const PURSUIT_LOOKAHEAD_M = 8;
+const END_STRAIGHT_M = 12;             // metres of dead-straight run-in before each stop (0 = off)
+const END_STRAIGHT_MAX_FRACTION = 0.4; // never more than this share of a short leg
+
+// Where the aircraft's reference point sits along the fuselage (fraction from nose).
+const PLANE_PIVOT_FROM_NOSE = 0.5;
+
+// Show route + ghost planes while using a non top-down camera?
+const SHOW_OVERLAY_IN_FREE_CAMERA = false;
+
+// Orbit camera limits (used by every non-top camera angle).
+const ORBIT_RANGE_DEFAULT = 55;
+const ORBIT_RANGE_MIN = 12;
+const ORBIT_RANGE_MAX = 400;
+const ORBIT_PITCH_DEFAULT = -22;
+
+// Camera angles available while moving.
+//   offset = degrees around the aircraft (0 = behind tail, 90 = side, 180 = in front)
+//   follow = true: the camera turns with the aircraft; false: stays fixed in the world
+//   mount  = true: the camera is fixed ON the aircraft (cockpit / wings), see below
+const CAMERA_MODES = {
+    top:     { label: "Top",     key: "1" },
+    chase:   { label: "Chase",   key: "2", offset: 0,   pitch: -16, range: ORBIT_RANGE_DEFAULT, follow: true  },
+    side:    { label: "Side",    key: "3", offset: 90,  pitch: -12, range: 60,                  follow: true  },
+    front:   { label: "Front",   key: "4", offset: 180, pitch: -14, range: 55,                  follow: true  },
+    orbit:   { label: "Orbit",   key: "5", offset: 0,   pitch: ORBIT_PITCH_DEFAULT, range: 70, follow: false },
+    wing1:   { label: "Wing 1",  key: "6", mount: true },
+    wing2:   { label: "Wing 2",  key: "7", mount: true },
+    cockpit: { label: "Cockpit", key: "8", mount: true }
+};
+const CAMERA_ORDER = ["top", "chase", "side", "front", "orbit", "wing1", "wing2", "cockpit"];
+
+// ---- On-aircraft cameras (wing 1 = left wingtip, wing 2 = right wingtip, cockpit) ----
+// GeoFS does not publish wing geometry, so these are ESTIMATES in metres.
+// Positions are measured from the aircraft's reference point:
+//   right / forward / up.  Tune them if a camera sits in the wrong place.
+// Wing cameras look backwards (the direction of a pushback) and a little outward.
+const WING_SPAN_M = 28.4;            // full wingspan. Set to 0 to hide both wing cameras.
+// The wing cameras sit next to the fuselage above the wing root and look OUT along the wing.
+const WING_CAM_RIGHT_M = 3.0;        // distance from the centre line (metres)
+const WING_CAM_FORWARD_M = -1;       // along the fuselage (negative = behind the middle)
+const WING_CAM_UP_M = 3.6;           // height above the aircraft reference point
+const WING_LOOK_YAW_DEG = 105;       // 90 = straight out sideways, bigger = looking more backwards
+const WING_CAM_PITCH_DEG = -14;      // look down a little so the wing is in view
+const WING_FOV_DEG = 85;
+
+// Cockpit: the camera position comes from the aircraft definition when GeoFS
+// provides one, otherwise from these fallbacks.
+const COCKPIT_FORWARD_FRACTION = 0.38;   // of the aircraft length ahead of the reference point
+const COCKPIT_UP_M = 2.3;
+const COCKPIT_FOV_DEG = 80;
+
+// Per-aircraft overrides. The key is matched (case-insensitive) against the
+// aircraft's name. Any field may be left out. Example:
+//   "737": { cockpit: [0, 11, 2.4], wingSpan: 28.4, wingCamRight: 2.6, wingCamForward: -1, wingCamUp: 2.6, wingLookYaw: 105 }
+const AIRCRAFT_CAMERA_OVERRIDES = {};
+
+// Key that cycles through the camera angles while moving.
+const TOGGLE_VIEW_KEY = "v";
+
+// Rotation. Mouse wheel / buttons turn the heading of the stop.
+const ROTATE_STEP_DEG = 5;
+const ROTATE_STEP_FINE_DEG = 1;      // hold Shift
+const MAX_YAW_RATE = 0.22;           // rad/s the tug may turn the aircraft
+const YAW_GAIN = 1.6;
+const YAW_LOOKAHEAD_M = 10;
+
+// Saved plans (stored in this browser via localStorage).
+const STORE_KEY = "ypb_saved_v1";
+const STORE_LAST_AIRPORT_KEY = "ypb_last_airport";
+const SAVED_START_WARN_M = 25;       // warn when loading a plan and the plane is further than this from the saved start
+
+// ============================================================
+// STATE
+// ============================================================
+
+let ready = false;
+let selecting = false;
+let pushing = false;
+let straightMode = false;   // true = dead-straight legs (no curve), headings follow the line
+let towForward = false;     // false = push BACK (Y), true = pull FORWARD (T)
+let speedSetting = PUSHBACK_SPEED;
+
+let stops = [];             // confirmed stops: {lat, lon, heading}
+let preview = null;         // stop under the mouse (not yet confirmed)
+let stopEnds = [];          // distance along the route where each stop ends
+let stopIndex = 0;          // stop the plane is currently heading to
+let routeProgress = 0;      // how far along the route the plane has got
+let pauseUntil = 0;
+
+let oldCamera = null;
+let overheadActive = false; // true while the top view owns the camera
+let orbitActive = false;    // true while an orbit-style camera owns the camera
+let cameraMode = "top";
+let mountActive = false;    // true while an on-aircraft camera (wing / cockpit) is used
+let mountLook = { yaw: 0, pitch: 0 };   // mouse look-around offset for on-aircraft cameras
+let mountFov = 80;
+let savedFov = null;
+let orbit = { heading: 0, offset: 0, follow: true, pitch: radians(-22), range: 55 };
+let measuredSpeed = 0;
+let lastMoveSample = null;
+let stallFrames = 0;
+let stallWarned = false;
+let overlayActive = false;
+let cameraHeight = CAMERA_HEIGHT_DEFAULT;
+let finishTimer = null;
+let lastFrameT = 0;
+let frameErrors = 0;
+
+let startPosition = null;   // {lat, lon, alt}
+let startHeading = 0;
+let finalHeading = 0;       // heading for the next / last stop (wheel rotates this)
+
+// yaw auto-calibration
+let yawSign = 1;
+let yawLastHeading = null;
+let yawBadFrames = 0;
+let yawIdleFrames = 0;
+let yawLastErr = 0;
+let yawWarned = false;
+
+let routePoints = [];
+let routeLengths = [];
+let routeTotalLength = 0;
+
+let currentSpeed = 0;
+let smoothVel = { x: 0, y: 0 };   // blended velocity actually sent to the aircraft
+let smoothTarget = null;         // blended wanted heading
+let smoothYawRate = 0;           // blended turning rate
+
+let plannerCanvas = null;
+let plannerCtx = null;
+
+// Textures are loaded on demand, one per URL: { img, loaded, crop }
+const textureCache = {};
+let nightCache = { t: 0, value: false };
+let specCache = { name: null, spec: null };
+
+// ============================================================
+// WAIT FOR GEOFS  (works on GeoFS 3.9 and 4.0 / beta)
+// ============================================================
+
+let waitAttempts = 0;
+
+// Where the Cesium viewer lives can differ between GeoFS builds.
+function findViewer() {
+    try {
+        return (geofs.api && geofs.api.viewer) || window.viewer || geofs.viewer || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function waitForGeoFS() {
+    // Give up after ~10 minutes (e.g. we are on a non-game page of geo-fs.com).
+    if (++waitAttempts > 1200) return;
+
+    // Make sure geofs.api.viewer exists wherever this build keeps it.
+    try {
+        if (window.geofs && geofs.api && !geofs.api.viewer) {
+            const v = findViewer();
+            if (v) geofs.api.viewer = v;
+        }
+    } catch (e) {}
+
+    if (
+        window.geofs &&
+        geofs.aircraft &&
+        geofs.aircraft.instance &&
+        geofs.api &&
+        geofs.api.viewer &&
+        window.Cesium
+    ) {
+        ready = true;
+        console.log("[Y Pushback] GeoFS ready. GeoFS version: " + geofs.version);
+
+        createUI();
+        createPanel();
+        createSavedMenu();
+        createPlannerCanvas();
+        loadPlaneTexture();
+        hookRenderLoop();
+        hookCameraMouse();
+
+        notify("Y PUSHBACK READY  •  Y = push back  •  T = pull forward");
+        setTimeout(hideUI, 3000);
+    } else {
+        setTimeout(waitForGeoFS, 500);
+    }
+}
+
+// ============================================================
+// AIRCRAFT
+// ============================================================
+
+function aircraft() {
+    return geofs.aircraft.instance;
+}
+
+function getPosition() {
+    const a = aircraft();
+    if (!a || !a.llaLocation) return null;
+    return { lat: a.llaLocation[0], lon: a.llaLocation[1], alt: a.llaLocation[2] };
+}
+
+// Position used by the cameras: follows the aircraft with a tiny delay so the
+// picture glides instead of jittering with every physics step.
+let camSmooth = null;
+let camSmoothT = 0;
+
+function resetCameraSmoothing() { camSmooth = null; }
+
+function getCameraPosition() {
+    const p = getPosition();
+    if (!p) return null;
+
+    const now = performance.now();
+    const dt = Math.min(0.1, Math.max(0.001, (now - (camSmoothT || now)) / 1000));
+    camSmoothT = now;
+
+    if (!camSmooth || CAMERA_SMOOTH_S <= 0 || !pushing || distance(camSmooth, p) > 30) {
+        camSmooth = { lat: p.lat, lon: p.lon, alt: p.alt };
+        return camSmooth;
+    }
+
+    const k = 1 - Math.exp(-dt / CAMERA_SMOOTH_S);
+    camSmooth.lat += (p.lat - camSmooth.lat) * k;
+    camSmooth.lon += (p.lon - camSmooth.lon) * k;
+    camSmooth.alt += (p.alt - camSmooth.alt) * k;
+    return camSmooth;
+}
+
+function getAircraftHeading() {
+    const a = aircraft();
+    if (!a) return 0;
+
+    try {
+        if (
+            geofs.animation &&
+            geofs.animation.values &&
+            typeof geofs.animation.values.heading360 === "number"
+        ) {
+            return normalizeAngle(geofs.animation.values.heading360);
+        }
+    } catch (e) {}
+
+    try {
+        if (Array.isArray(a.htr) && typeof a.htr[0] === "number") {
+            let h = a.htr[0];
+            if (Math.abs(h) <= Math.PI * 2.5) h = h * 180 / Math.PI;
+            return normalizeAngle(h);
+        }
+    } catch (e) {}
+
+    try {
+        if (typeof a.heading === "number") return normalizeAngle(a.heading);
+    } catch (e) {}
+
+    return 0;
+}
+
+// GeoFS spawns the aircraft with the parking brake set, and can re-apply it.
+function releaseBrakes() {
+    try {
+        if (window.controls) {
+            controls.parkingBrake = 0;
+            controls.brakes = 0;
+        }
+    } catch (e) {}
+
+    try {
+        geofs.animation.values.parkingBrake = 0;
+        geofs.animation.values.brakes = 0;
+    } catch (e) {}
+}
+
+// Sets the parking brake (the plane stays put once the tug lets go).
+function setParkingBrake() {
+    try {
+        if (window.controls) controls.parkingBrake = 1;
+    } catch (e) {}
+
+    try {
+        geofs.animation.values.parkingBrake = 1;
+    } catch (e) {}
+}
+
+// ============================================================
+// MATH
+// ============================================================
+
+function radians(x) { return x * Math.PI / 180; }
+function degrees(x) { return x * 180 / Math.PI; }
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function normalizeAngle(angle) {
+    angle %= 360;
+    if (angle < 0) angle += 360;
+    return angle;
+}
+
+function angleDifference(a, b) {
+    let d = normalizeAngle(a) - normalizeAngle(b);
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
+}
+
+function distance(a, b) {
+    const R = 6371000;
+    const lat1 = radians(a.lat);
+    const lat2 = radians(b.lat);
+    const dLat = radians(b.lat - a.lat);
+    const dLon = radians(b.lon - a.lon);
+    const h =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+// x = east, y = north (metres)
+function geoToLocal(origin, point) {
+    const R = 6371000;
+    const meanLat = radians((origin.lat + point.lat) / 2);
+    return {
+        x: radians(point.lon - origin.lon) * R * Math.cos(meanLat),
+        y: radians(point.lat - origin.lat) * R
+    };
+}
+
+function localToGeo(origin, local) {
+    const R = 6371000;
+    return {
+        lat: origin.lat + degrees(local.y / R),
+        lon: origin.lon + degrees(local.x / (R * Math.cos(radians(origin.lat))))
+    };
+}
+
+// ---- Direction of travel (push back = opposite the nose, pull forward = along the nose) ----
+
+// Compass heading of the direction the aircraft travels when its nose points at `heading`.
+function travelHeading(heading) {
+    return towForward ? heading : heading + 180;
+}
+
+// Unit vector (east, north) of that travel direction.
+function travelDir(heading) {
+    const t = radians(travelHeading(heading));
+    return { x: Math.sin(t), y: Math.cos(t) };
+}
+
+// Nose heading needed so the aircraft travels along compass bearing `bearing`.
+function noseHeadingForTravel(bearing) {
+    return normalizeAngle(towForward ? bearing : bearing + 180);
+}
+
+function sideWord() { return towForward ? "IN FRONT OF" : "BEHIND"; }
+function modeName() { return towForward ? "PULL FORWARD" : "PUSHBACK"; }
+
+// ============================================================
+// AIRCRAFT TYPE (image + real length)
+// ============================================================
+
+// Lower-case text describing the aircraft, letters and digits only.
+// "Boeing 737-800" -> "boeing737800"
+function aircraftKey() {
+    let parts = [];
+
+    try {
+        const a = aircraft();
+        if (a.aircraftRecord) {
+            parts.push(a.aircraftRecord.name, a.aircraftRecord.fullPath);
+        }
+        if (a.definition) parts.push(a.definition.name);
+        parts.push(a.name, a.id);
+    } catch (e) {}
+
+    return parts
+        .filter(function (p) { return typeof p === "string" && p; })
+        .join(" ")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "");
+}
+
+function findSpec(key) {
+    // The "-?" in the patterns is harmless: the key has no dashes anyway.
+    for (let i = 0; i < AIRCRAFT_SPECS.length; i++) {
+        if (AIRCRAFT_SPECS[i].re.test(key)) return AIRCRAFT_SPECS[i];
+    }
+    return null;
+}
+
+// The list entry for the aircraft being flown (null = unknown aircraft).
+function planeSpec() {
+    const key = aircraftKey();
+
+    if (specCache.name !== key) {
+        const spec = findSpec(key);
+        specCache = { name: key, spec: spec };
+
+        if (spec) {
+            console.log("[Y Pushback] Aircraft \"" + key + "\" -> " + spec.label + " (" + spec.length + " m)");
+            getTexture(spec.tex.day);
+            getTexture(spec.tex.night);
+        } else {
+            console.log("[Y Pushback] Aircraft \"" + key + "\" is not in the list — using a plain silhouette.");
+        }
+    }
+
+    return specCache.spec;
+}
+
+function planeLength() {
+    const s = planeSpec();
+    return s ? s.length : PLANE_LENGTH_M;
+}
+
+function planeNose() {
+    const s = planeSpec();
+    const n = s && s.nose !== undefined ? s.nose : PLANE_TEXTURE_NOSE_DEG;
+    return ((n % 360) + 360) % 360;
+}
+
+// Wingspan divided by length (estimate unless the list row has `span` in metres).
+function planeSpanRatio() {
+    const s = planeSpec();
+    if (s && s.span) return s.span / s.length;
+    return COLLISION_SPAN_RATIO;
+}
+
+function planeLabel() {
+    const s = planeSpec();
+    return s ? s.label + " (" + s.length + " m)" : "UNKNOWN AIRCRAFT";
+}
+
+// ============================================================
+// CAMERA
+// ============================================================
+
+function saveCamera() {}
+
+function applyOverheadCamera() {
+    const p = getCameraPosition();
+    if (!p) return;
+
+    const Cesium = window.Cesium;
+
+    geofs.api.viewer.camera.setView({
+        destination: Cesium.Cartesian3.fromDegrees(
+            p.lon,
+            p.lat,
+            p.alt + cameraHeight
+        ),
+        orientation: {
+            heading: 0,                // north up
+            pitch: -Math.PI / 2,       // straight down
+            roll: 0
+        }
+    });
+}
+
+// Stop driving the camera. GeoFS takes over by itself.
+function restoreCamera() {
+    overheadActive = false;
+    orbitActive = false;
+    mountActive = false;
+    restoreFov();
+    if (nativeCockpit) leaveNativeCockpit();
+    cameraMode = "top";
+    oldCamera = null;
+}
+
+function applyOrbitCamera() {
+    const p = getCameraPosition();
+    if (!p) return;
+
+    const C = window.Cesium;
+    const camera = geofs.api.viewer.camera;
+
+    // "Follow" angles turn with the aircraft; free orbit stays fixed in the world.
+    if (orbit.follow) {
+        orbit.heading = radians(getAircraftHeading()) + orbit.offset;
+    }
+
+    camera.lookAt(
+        C.Cartesian3.fromDegrees(p.lon, p.lat, p.alt + 4),
+        new C.HeadingPitchRange(orbit.heading, orbit.pitch, orbit.range)
+    );
+
+    camera.lookAtTransform(C.Matrix4.IDENTITY);
+}
+
+// ---------- On-aircraft cameras ----------
+
+function aircraftName() {
+    try {
+        const a = aircraft();
+        const n =
+            (a.aircraftRecord && a.aircraftRecord.name) ||
+            (a.definition && a.definition.name) ||
+            a.name || "";
+        return String(n).toLowerCase();
+    } catch (e) {
+        return "";
+    }
+}
+
+function aircraftOverride() {
+    const name = aircraftName();
+    if (!name) return null;
+
+    for (const key in AIRCRAFT_CAMERA_OVERRIDES) {
+        if (name.indexOf(key.toLowerCase()) !== -1) return AIRCRAFT_CAMERA_OVERRIDES[key];
+    }
+    return null;
+}
+
+function validTriple(v) {
+    return Array.isArray(v) && v.length >= 3 && v.slice(0, 3).every(Number.isFinite);
+}
+
+// Cockpit eye position as {right, forward, up, source}.
+function cockpitPosition(o) {
+    if (o && validTriple(o.cockpit)) {
+        return { right: o.cockpit[0], forward: o.cockpit[1], up: o.cockpit[2], source: "override" };
+    }
+
+    const len = planeLength();
+
+    try {
+        const pos = aircraft().definition.cameras.cockpit.position;
+        // GeoFS definitions list positions as [right, forward, up] in metres.
+        if (validTriple(pos) && Math.abs(pos[1]) <= len && Math.abs(pos[0]) <= len) {
+            return { right: pos[0], forward: pos[1], up: pos[2], source: "aircraft definition" };
+        }
+    } catch (e) {}
+
+    return {
+        right: 0,
+        forward: len * COCKPIT_FORWARD_FRACTION,
+        up: COCKPIT_UP_M,
+        source: "estimate"
+    };
+}
+
+// ---- Live tuning of the wing / cockpit cameras (saved in this browser) ----
+const TUNE_KEY = "ypb_cam_tune_v1";
+let tuneOpen = false;
+let mountTune = (function () {
+    try { return JSON.parse(localStorage.getItem(TUNE_KEY)) || {}; } catch (e) { return {}; }
+})();
+
+// Both wing cameras share one tuning (mirrored for the right side).
+function tuneKey(mode) {
+    return (mode === "wing1" || mode === "wing2") ? "wing" : mode;
+}
+
+// Carry over an earlier Wing 1 tuning to the shared one.
+if (!mountTune.wing && mountTune.wing1) mountTune.wing = mountTune.wing1;
+
+function tuneFor(mode) {
+    const k = tuneKey(mode);
+    if (!mountTune[k]) mountTune[k] = { out: 0, forward: 0, up: 0, yaw: 0, pitch: 0 };
+    return mountTune[k];
+}
+
+function saveTune() {
+    try { localStorage.setItem(TUNE_KEY, JSON.stringify(mountTune)); } catch (e) {}
+}
+
+function applyTune(mode, spec, side) {
+    const t = tuneFor(mode);
+    spec.right += side * t.out;
+    spec.forward += t.forward;
+    spec.up += t.up;
+    spec.yaw += side * t.yaw;
+    spec.pitch += t.pitch;
+    return spec;
+}
+
+function nudgeCamera(key, delta) {
+    if (!mountActive) return;
+    const t = tuneFor(cameraMode);
+    t[key] = Math.round((t[key] + delta) * 100) / 100;
+    saveTune();
+}
+
+function resetTune() {
+    if (!mountActive) return;
+    mountTune[tuneKey(cameraMode)] = { out: 0, forward: 0, up: 0, yaw: 0, pitch: 0 };
+    saveTune();
+    notify("CAMERA TUNING RESET");
+}
+
+// Shows the current numbers (also in the console) so they can be pasted
+// into AIRCRAFT_CAMERA_OVERRIDES.
+function showTuneValues() {
+    const spec = mountSpec(cameraMode);
+    if (!spec) return;
+
+    let line;
+    if (cameraMode === "cockpit") {
+        line = "cockpit: [" + [spec.right, spec.forward, spec.up].map(function (v) { return v.toFixed(2); }).join(", ") + "]";
+    } else {
+        line = "wingCamRight: " + Math.abs(spec.right).toFixed(2) +
+            ", wingCamForward: " + spec.forward.toFixed(2) +
+            ", wingCamUp: " + spec.up.toFixed(2) +
+            ", wingLookYaw: " + Math.abs(spec.yaw).toFixed(0) +
+            "  (pitch " + spec.pitch.toFixed(0) + ")";
+    }
+
+    console.log("[Y Pushback] " + cameraMode + " camera: " + line);
+    notify(cameraMode.toUpperCase() + " — " + line);
+}
+
+// Where an on-aircraft camera sits and looks. null = not available.
+function mountSpec(mode) {
+    const o = aircraftOverride();
+
+    if (mode === "cockpit") {
+        const c = cockpitPosition(o);
+        return applyTune(mode, { right: c.right, forward: c.forward, up: c.up, yaw: 0, pitch: -2, fov: COCKPIT_FOV_DEG, source: c.source }, 1);
+    }
+
+    if (mode === "wing1" || mode === "wing2") {
+        const span = o && o.wingSpan !== undefined ? o.wingSpan : WING_SPAN_M;
+        if (!(span > 0)) return null;
+
+        const side = mode === "wing1" ? -1 : 1;     // wing 1 = left, wing 2 = right
+
+        const right = o && o.wingCamRight !== undefined ? o.wingCamRight : WING_CAM_RIGHT_M;
+        const fwd   = o && o.wingCamForward !== undefined ? o.wingCamForward : WING_CAM_FORWARD_M;
+        const up    = o && o.wingCamUp !== undefined ? o.wingCamUp : WING_CAM_UP_M;
+        let look    = o && o.wingLookYaw !== undefined ? o.wingLookYaw : WING_LOOK_YAW_DEG;
+
+        // Look out along the wing (same view for push and pull).
+        return applyTune(mode, {
+            right: side * right,
+            forward: fwd,
+            up: up,
+            yaw: side * look,
+            pitch: WING_CAM_PITCH_DEG,
+            fov: WING_FOV_DEG
+        }, side);
+    }
+
+    return null;
+}
+
+function modeAvailable(mode) {
+    const m = CAMERA_MODES[mode];
+    if (!m) return false;
+    if (!m.mount) return true;
+    return !!mountSpec(mode);
+}
+
+// ---- GeoFS's own cockpit camera ----
+// The real cockpit view comes from the aircraft model, so we hand the camera
+// to GeoFS instead of guessing a position. Falls back to the estimated
+// camera (with the Tune buttons) if GeoFS doesn't expose what we need.
+let nativeCockpit = false;
+let prevGeofsCamMode = null;
+
+function findCockpitModeIndex(cam) {
+    const lists = [cam.modes, cam.modeNames, cam.cameraModes];
+
+    for (let i = 0; i < lists.length; i++) {
+        const l = lists[i];
+        if (!Array.isArray(l)) continue;
+
+        for (let j = 0; j < l.length; j++) {
+            const x = l[j];
+            const name = typeof x === "string" ? x : (x && (x.name || x.label)) || "";
+            if (/cockpit/i.test(name) && !/less/i.test(name)) return j;
+        }
+    }
+
+    return 1;   // GeoFS order: follow, cockpit, cockpit-less, chase, free, fixed
+}
+
+function enterNativeCockpit() {
+    try {
+        const cam = geofs.camera;
+        if (!cam || typeof cam.set !== "function") return false;
+
+        const idx = findCockpitModeIndex(cam);
+        prevGeofsCamMode = typeof cam.currentMode === "number" ? cam.currentMode : null;
+
+        cam.set(idx);
+
+        if (typeof cam.currentMode === "number" && cam.currentMode !== idx) {
+            // GeoFS refused: put things back and use our own camera.
+            if (prevGeofsCamMode !== null) cam.set(prevGeofsCamMode);
+            return false;
+        }
+
+        return true;
+    } catch (e) {
+        console.warn("[Y Pushback] Native cockpit camera unavailable:", e);
+        return false;
+    }
+}
+
+function leaveNativeCockpit() {
+    nativeCockpit = false;
+
+    try {
+        if (prevGeofsCamMode !== null && geofs.camera && typeof geofs.camera.set === "function") {
+            geofs.camera.set(prevGeofsCamMode);
+        }
+    } catch (e) {}
+
+    prevGeofsCamMode = null;
+}
+
+function saveFov() {
+    if (savedFov !== null) return;
+    try {
+        const f = geofs.api.viewer.camera.frustum.fov;
+        if (typeof f === "number") savedFov = f;
+    } catch (e) {}
+}
+
+function restoreFov() {
+    if (savedFov === null) return;
+    try { geofs.api.viewer.camera.frustum.fov = savedFov; } catch (e) {}
+    savedFov = null;
+}
+
+function applyMountCamera() {
+    const spec = mountSpec(cameraMode);
+    if (!spec) return;
+
+    const p = getCameraPosition();
+    if (!p) return;
+
+    const C = window.Cesium;
+    const camera = geofs.api.viewer.camera;
+
+    // Body offset (right / forward) -> east / north, using the aircraft heading.
+    const h = radians(getAircraftHeading());
+    const east = spec.right * Math.cos(h) + spec.forward * Math.sin(h);
+    const north = -spec.right * Math.sin(h) + spec.forward * Math.cos(h);
+
+    const enu = C.Transforms.eastNorthUpToFixedFrame(C.Cartesian3.fromDegrees(p.lon, p.lat, p.alt));
+    const dest = C.Matrix4.multiplyByPoint(enu, new C.Cartesian3(east, north, spec.up), new C.Cartesian3());
+
+    camera.setView({
+        destination: dest,
+        orientation: {
+            heading: h + radians(spec.yaw) + mountLook.yaw,
+            pitch: clamp(radians(spec.pitch) + mountLook.pitch, radians(-85), radians(85)),
+            roll: 0
+        }
+    });
+
+    try { camera.frustum.fov = radians(mountFov); } catch (e) {}
+}
+
+// Switch camera angle (only while moving).
+function setCameraMode(mode) {
+    if (!pushing || !CAMERA_MODES[mode]) return;
+
+    if (!modeAvailable(mode)) {
+        notify(CAMERA_MODES[mode].label.toUpperCase() + " CAMERA NOT AVAILABLE");
+        return;
+    }
+
+    const m = CAMERA_MODES[mode];
+
+    if (mountActive && !m.mount) restoreFov();
+    if (nativeCockpit) leaveNativeCockpit();
+
+    cameraMode = mode;
+    overheadActive = false;
+    orbitActive = false;
+    mountActive = false;
+
+    if (mode === "top") {
+        overheadActive = true;
+    } else if (m.mount && mode === "cockpit" && enterNativeCockpit()) {
+        nativeCockpit = true;
+        notify("COCKPIT — DRAG TO LOOK AROUND");
+    } else if (m.mount) {
+        const spec = mountSpec(mode);
+
+        saveFov();
+        mountLook = { yaw: 0, pitch: 0 };
+        mountFov = spec.fov;
+        mountActive = true;
+
+        if (mode === "cockpit") {
+            console.log("[Y Pushback] Cockpit camera position from: " + spec.source,
+                "right/forward/up =", spec.right.toFixed(1), spec.forward.toFixed(1), spec.up.toFixed(1));
+        }
+    } else {
+        orbitActive = true;
+
+        orbit.follow = m.follow;
+        orbit.offset = radians(m.offset);
+        orbit.pitch = radians(m.pitch);
+        orbit.range = m.range;
+        orbit.heading = radians(getAircraftHeading()) + orbit.offset;
+    }
+
+    updatePanel();
+}
+
+function cycleCamera(step) {
+    if (!pushing) return;
+
+    let i = CAMERA_ORDER.indexOf(cameraMode);
+
+    for (let n = 0; n < CAMERA_ORDER.length; n++) {
+        i = (i + step + CAMERA_ORDER.length) % CAMERA_ORDER.length;
+        if (modeAvailable(CAMERA_ORDER[i])) {
+            setCameraMode(CAMERA_ORDER[i]);
+            return;
+        }
+    }
+}
+
+// Mouse look: drag = orbit / look around, wheel = zoom. Listens on the
+// GeoFS 3D canvas only, so GeoFS's own buttons and menus keep working.
+function hookCameraMouse() {
+    let dragging = false;
+    let lx = 0, ly = 0;
+
+    function onCanvas(event) {
+        return geofs.api.viewer && event.target === geofs.api.viewer.canvas;
+    }
+
+    window.addEventListener("mousedown", function (e) {
+        if (!(pushing && (orbitActive || overheadActive || mountActive)) || !onCanvas(e)) return;
+        dragging = true; lx = e.clientX; ly = e.clientY;
+    }, true);
+
+    window.addEventListener("mouseup", function () { dragging = false; }, true);
+
+    window.addEventListener("mousemove", function (e) {
+        if (!dragging || !(orbitActive || mountActive)) return;
+
+        if (mountActive) {
+            // Look around from the wing / cockpit.
+            mountLook.yaw += (e.clientX - lx) * 0.005;
+            mountLook.pitch = clamp(mountLook.pitch - (e.clientY - ly) * 0.005, radians(-80), radians(80));
+        } else {
+            const dx = (e.clientX - lx) * 0.006;
+
+            if (orbit.follow) orbit.offset += dx;
+            else orbit.heading += dx;
+
+            orbit.pitch = clamp(orbit.pitch - (e.clientY - ly) * 0.005, radians(-89), radians(-2));
+        }
+
+        lx = e.clientX; ly = e.clientY;
+    }, true);
+
+    window.addEventListener("wheel", function (e) {
+        if (!pushing || !onCanvas(e)) return;
+
+        const f = e.deltaY > 0 ? 1.1 : 1 / 1.1;
+
+        if (orbitActive) {
+            orbit.range = clamp(orbit.range * f, ORBIT_RANGE_MIN, ORBIT_RANGE_MAX);
+        } else if (mountActive) {
+            mountFov = clamp(mountFov * f, 30, 110);     // wheel = zoom (field of view)
+        } else if (overheadActive) {
+            cameraHeight = clamp(cameraHeight * f, CAMERA_HEIGHT_MIN, CAMERA_HEIGHT_MAX);
+        }
+    }, { capture: true, passive: true });
+}
+
+// Each frame, right before rendering: run the physics, then
+// re-apply our camera (GeoFS repositions its own every frame). The overlay
+// is drawn right after the render so both use exactly the same camera.
+function hookRenderLoop() {
+    const scene = geofs.api.viewer.scene;
+
+    scene.preRender.addEventListener(function () {
+        if (pushing) updatePushback();
+
+        if (overheadActive) {
+            try { applyOverheadCamera(); } catch (e) {}
+        } else if (orbitActive) {
+            try { applyOrbitCamera(); } catch (e) {}
+        } else if (mountActive) {
+            try { applyMountCamera(); } catch (e) {}
+        }
+    });
+
+    scene.postRender.addEventListener(function () {
+        if (overlayActive) {
+            try { drawPlanner(); } catch (e) {
+                console.error("[Y Pushback] draw error", e);
+            }
+        }
+    });
+}
+
+// ============================================================
+// UI
+// ============================================================
+
+function createUI() {
+    if (document.getElementById("y-pushback-ui")) return;
+
+    const ui = document.createElement("div");
+    ui.id = "y-pushback-ui";
+
+    ui.style.cssText = `
+        position:fixed;
+        top:50px;
+        left:50%;
+        transform:translateX(-50%) scale(${UI_SCALE});
+        transform-origin:top center;
+        z-index:999999;
+        background:rgba(8,10,12,.94);
+        color:white;
+        padding:13px 22px;
+        border-radius:10px;
+        border:1px solid rgba(255,255,255,.18);
+        font-family:Arial,sans-serif;
+        text-align:center;
+        display:none;
+        min-width:300px;
+        pointer-events:none;
+        box-shadow:0 5px 25px rgba(0,0,0,.45);
+    `;
+
+    ui.innerHTML = `
+        <div id="y-pushback-title" style="font-size:19px;font-weight:bold;margin-bottom:5px;">PUSHBACK PLANNER</div>
+        <div id="y-pushback-status" style="font-size:14px;">Ready</div>
+        <div id="y-pushback-distance" style="margin-top:5px;font-size:13px;opacity:.8;"></div>
+        <div id="y-pushback-heading" style="margin-top:3px;font-size:12px;opacity:.65;"></div>
+    `;
+
+    document.body.appendChild(ui);
+}
+
+function notify(text) {
+    const ui = document.getElementById("y-pushback-ui");
+    if (!ui) return;
+    ui.style.display = "block";
+    const title = document.getElementById("y-pushback-title");
+    if (title) title.textContent = modeName() + " PLANNER";
+    const status = document.getElementById("y-pushback-status");
+    if (status) status.textContent = text;
+}
+
+function updateDistanceUI(d) {
+    const el = document.getElementById("y-pushback-distance");
+    if (el) el.textContent = "Distance: " + d.toFixed(1) + " m";
+}
+
+function updateHeadingUI() {
+    const el = document.getElementById("y-pushback-heading");
+    if (!el) return;
+
+    let t = "Heading: " + getAircraftHeading().toFixed(0) + "°";
+    if (selecting) t += "  →  next stop " + finalHeading.toFixed(0) + "°";
+    if (pushing) t += "  →  stop " + Math.min(stopIndex + 1, stops.length) + "/" + stops.length +
+                      "  •  " + measuredSpeed.toFixed(1) + " m/s (set " + speedSetting.toFixed(1) + ")";
+    if (selecting || pushing) t += "  •  " + planeLabel();
+    el.textContent = t;
+}
+
+function hideUI() {
+    const ui = document.getElementById("y-pushback-ui");
+    if (ui) ui.style.display = "none";
+}
+
+// ---------- Control panel (buttons) ----------
+
+function createPanel() {
+    if (document.getElementById("y-pushback-panel")) return;
+
+    const style = document.createElement("style");
+    style.textContent = `
+        .ypb-row { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; align-items:center; }
+        .ypb-label { color:rgba(255,255,255,.75); font-size:12px; margin-right:2px; text-shadow:0 1px 3px #000; }
+        .ypb-btn {
+            background:rgba(12,16,20,.92); color:#fff; border:1px solid rgba(255,255,255,.28);
+            border-radius:8px; padding:8px 14px; font:600 13px Arial,sans-serif; cursor:pointer;
+            box-shadow:0 3px 12px rgba(0,0,0,.4);
+        }
+        .ypb-btn:hover { background:rgba(40,52,64,.95); }
+        .ypb-btn.active { background:#1b78c9; border-color:#7cc4ff; }
+        .ypb-btn:disabled { opacity:.5; cursor:not-allowed; }
+        .ypb-ready { background:#1f9d55; border-color:#7de2a8; font-size:15px; padding:11px 24px; }
+        .ypb-ready:hover { background:#27b866; }
+        .ypb-ready:disabled { background:rgba(60,64,68,.92); border-color:rgba(255,255,255,.2); }
+        .ypb-stop { background:#b3261e; border-color:#ff8a80; }
+        .ypb-stop:hover { background:#d32f2f; }
+        .ypb-save { background:#7a4fd0; border-color:#c3a6ff; }
+        .ypb-save:hover { background:#8d63e3; }
+        .ypb-spd { padding:6px 12px; font-size:15px; }
+        .ypb-speedval { color:#fff; font:700 13px Arial,sans-serif; min-width:66px; text-align:center; text-shadow:0 1px 3px #000; }
+    `;
+    document.head.appendChild(style);
+
+    // ---- main panel ----
+    const p = document.createElement("div");
+    p.id = "y-pushback-panel";
+    p.style.cssText = `
+        position:fixed;
+        bottom:56px;
+        left:50%;
+        transform:translateX(-50%) scale(${UI_SCALE});
+        transform-origin:bottom center;
+        z-index:1000000;
+        display:none;
+        flex-direction:column;
+        align-items:center;
+        gap:8px;
+        max-width:94vw;
+        font-family:Arial,sans-serif;
+        background:rgba(8,10,12,.62);
+        padding:8px 12px;
+        border-radius:12px;
+    `;
+
+    const camButtons = CAMERA_ORDER.map(function (k) {
+        return '<button class="ypb-btn" data-act="cam" data-cam="' + k + '" title="Key ' +
+            CAMERA_MODES[k].key + '">' + CAMERA_MODES[k].label + '</button>';
+    }).join("");
+
+    p.innerHTML = `
+        <div id="y-pb-setup" class="ypb-row">
+            <button class="ypb-btn" data-act="rotL">⟲ Rotate</button>
+            <button class="ypb-btn" data-act="rotR">Rotate ⟳</button>
+            <button class="ypb-btn" data-act="undo">Undo stop</button>
+            <button class="ypb-btn" data-act="clear">Clear all</button>
+            <button id="y-pb-straight-btn" class="ypb-btn" data-act="straight" title="Key L">━ Straight: OFF</button>
+            <button class="ypb-btn ypb-save" data-act="savePlan" title="Key S">💾 Save plan</button>
+            <button class="ypb-btn" data-act="openSaved">📂 Saved</button>
+            <button class="ypb-btn" data-act="cancel">Cancel</button>
+        </div>
+        <div id="y-pb-ready" class="ypb-row">
+            <button id="y-pb-ready-btn" class="ypb-btn ypb-ready" data-act="ready">NOT READY</button>
+        </div>
+        <div id="y-pb-run" class="ypb-row">
+            <button class="ypb-btn ypb-stop" data-act="stop">■ Stop</button>
+            <button id="y-pb-tune-btn" class="ypb-btn" data-act="tuneToggle">⚙ Tune</button>
+        </div>
+        <div id="y-pb-speed" class="ypb-row">
+            <span class="ypb-label">Speed</span>
+            <button class="ypb-btn ypb-spd" data-act="spdD" title="Key -">−</button>
+            <span id="y-pb-speed-val" class="ypb-speedval">2.2 m/s</span>
+            <button class="ypb-btn ypb-spd" data-act="spdU" title="Key +">+</button>
+        </div>
+        <div id="y-pb-zoom" class="ypb-row">
+            <span class="ypb-label">Zoom</span>
+            <button class="ypb-btn ypb-spd" data-act="zoomOut" title="Key [">−</button>
+            <button class="ypb-btn ypb-spd" data-act="zoomIn" title="Key ]">+</button>
+        </div>
+        <div id="y-pb-tune" class="ypb-row">
+            <span class="ypb-label">Tune</span>
+            <span class="ypb-label">Fwd</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="forward" data-d="-0.5">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="forward" data-d="0.5">+</button>
+            <span class="ypb-label">Up</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="up" data-d="-0.3">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="up" data-d="0.3">+</button>
+            <span class="ypb-label">Out</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="out" data-d="-0.3">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="out" data-d="0.3">+</button>
+            <span class="ypb-label">Turn</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="yaw" data-d="-5">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="yaw" data-d="5">+</button>
+            <span class="ypb-label">Tilt</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="pitch" data-d="-3">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="pitch" data-d="3">+</button>
+            <button class="ypb-btn" data-act="tuneReset">Reset</button>
+            <button class="ypb-btn" data-act="tuneShow">Values</button>
+        </div>
+        <div id="y-pb-cams" class="ypb-row">
+            <span class="ypb-label">Camera</span>${camButtons}
+        </div>
+    `;
+
+    p.addEventListener("click", function (e) {
+        const b = e.target.closest("button");
+        if (!b || b.disabled) return;
+
+        switch (b.dataset.act) {
+            case "rotL":      rotateFinalHeading(-ROTATE_STEP_DEG); break;
+            case "rotR":      rotateFinalHeading(ROTATE_STEP_DEG); break;
+            case "undo":      undoStop(); break;
+            case "clear":     clearStops(); break;
+            case "cancel":    cancelSelection(); break;
+            case "ready":     confirmReady(); break;
+            case "stop":      stopPushback(); break;
+            case "cam":       setCameraMode(b.dataset.cam); break;
+            case "spdD":      changeSpeed(-SPEED_STEP); break;
+            case "spdU":      changeSpeed(SPEED_STEP); break;
+            case "tune":      nudgeCamera(b.dataset.k, parseFloat(b.dataset.d)); break;
+            case "tuneToggle": tuneOpen = !tuneOpen; updatePanel(); break;
+            case "tuneReset": resetTune(); break;
+            case "tuneShow":  showTuneValues(); break;
+            case "zoomIn":    zoomView(1 / ZOOM_STEP); break;
+            case "zoomOut":   zoomView(ZOOM_STEP); break;
+            case "straight":  toggleStraight(); break;
+            case "savePlan":  savePlan(); break;
+            case "openSaved": openSaved(); break;
+        }
+
+        b.blur();   // so Space / Enter in GeoFS never re-trigger a button
+    });
+
+    document.body.appendChild(p);
+
+    // ---- launcher (visible while idle) ----
+    const l = document.createElement("div");
+    l.id = "y-pushback-launcher";
+    l.style.cssText = `
+        position:fixed;
+        bottom:50px;
+        left:10px;
+        transform:scale(${UI_SCALE});
+        transform-origin:bottom left;
+        z-index:1000000;
+        display:flex;
+        gap:6px;
+        font-family:Arial,sans-serif;
+    `;
+    l.innerHTML = `
+        <button class="ypb-btn" style="padding:6px 10px;font-size:12px;" data-act="push" title="Key Y">⬅ Push back</button>
+        <button class="ypb-btn" style="padding:6px 10px;font-size:12px;" data-act="pull" title="Key T">➡ Pull forward</button>
+        <button class="ypb-btn" style="padding:6px 10px;font-size:12px;" data-act="saved">📂 Saved</button>
+    `;
+    l.addEventListener("click", function (e) {
+        const b = e.target.closest("button");
+        if (!b) return;
+        if (b.dataset.act === "push") startPushbackMode(false);
+        else if (b.dataset.act === "pull") startPushbackMode(true);
+        else if (b.dataset.act === "saved") openSaved();
+        b.blur();
+    });
+    document.body.appendChild(l);
+
+    updatePanel();
+}
+
+function setRow(id, on) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = on ? "flex" : "none";
+}
+
+function updatePanel() {
+    const p = document.getElementById("y-pushback-panel");
+    if (!p) return;
+
+    p.style.display = (selecting || pushing) ? "flex" : "none";
+
+    setRow("y-pb-setup", selecting);
+    setRow("y-pb-ready", selecting);
+    setRow("y-pb-run", pushing);
+    setRow("y-pb-speed", selecting || pushing);
+    setRow("y-pb-cams", pushing);
+    setRow("y-pb-tune", pushing && mountActive && tuneOpen);
+    const tb = document.getElementById("y-pb-tune-btn");
+    if (tb) {
+        tb.style.display = (pushing && mountActive) ? "" : "none";
+        tb.classList.toggle("active", tuneOpen);
+    }
+    setRow("y-pb-zoom", selecting || (pushing && cameraMode === "top"));
+
+    const launcher = document.getElementById("y-pushback-launcher");
+    if (launcher) launcher.style.display = (selecting || pushing) ? "none" : "flex";
+
+    const stb = document.getElementById("y-pb-straight-btn");
+    if (stb) {
+        stb.textContent = "━ Straight: " + (straightMode ? "ON" : "OFF");
+        stb.classList.toggle("active", straightMode);
+    }
+
+    const sv = document.getElementById("y-pb-speed-val");
+    if (sv) sv.textContent = speedSetting.toFixed(1) + " m/s";
+
+    const rb = document.getElementById("y-pb-ready-btn");
+    if (rb) {
+        rb.disabled = stops.length === 0;
+        rb.textContent = stops.length
+            ? (collisionWarn ? "⚠ COLLISION RISK — START " : "✔ READY — START ") + modeName() + " (" + stops.length + (stops.length === 1 ? " stop)" : " stops)")
+            : "NOT READY — CLICK TO ADD A STOP";
+        rb.style.background = (stops.length && collisionWarn) ? "#c62828" : "";
+        rb.style.borderColor = (stops.length && collisionWarn) ? "#ff8a80" : "";
+    }
+
+    p.querySelectorAll("[data-cam]").forEach(function (b) {
+        b.classList.toggle("active", b.dataset.cam === cameraMode);
+        // Wing cameras only show up when the aircraft has a usable wingspan.
+        b.style.display = (pushing && !modeAvailable(b.dataset.cam)) ? "none" : "";
+    });
+}
+
+// ============================================================
+// SPEED CONTROL
+// ============================================================
+
+// Top-view zoom: factor < 1 = closer, factor > 1 = further away.
+function zoomView(factor) {
+    cameraHeight = clamp(cameraHeight * factor, CAMERA_HEIGHT_MIN, CAMERA_HEIGHT_MAX);
+}
+
+function changeSpeed(delta) {
+    speedSetting = clamp(Math.round((speedSetting + delta) * 10) / 10, SPEED_MIN, SPEED_MAX);
+    updatePanel();
+    notify("SPEED " + speedSetting.toFixed(1) + " m/s");
+}
+
+// ============================================================
+// SAVED PLANS (per airport)
+// ============================================================
+
+function loadStore() {
+    try {
+        const v = JSON.parse(localStorage.getItem(STORE_KEY));
+        return Array.isArray(v) ? v : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function writeStore(list) {
+    try {
+        localStorage.setItem(STORE_KEY, JSON.stringify(list));
+        return true;
+    } catch (e) {
+        console.error("[Y Pushback] Could not save:", e);
+        notify("COULD NOT SAVE — BROWSER STORAGE BLOCKED");
+        return false;
+    }
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+}
+
+function savePlan() {
+    if (!selecting || !stops.length) {
+        notify("ADD AT LEAST ONE STOP BEFORE SAVING");
+        return;
+    }
+
+    let lastAirport = "";
+    try { lastAirport = localStorage.getItem(STORE_LAST_AIRPORT_KEY) || ""; } catch (e) {}
+
+    const airport = window.prompt("Airport (e.g. ENGM):", lastAirport);
+    if (airport === null) return;
+
+    const name = window.prompt("Name for this plan (e.g. Gate 12 → taxiway A):", "Gate");
+    if (name === null) return;
+
+    const entry = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        airport: (airport.trim() || "UNSORTED").toUpperCase(),
+        name: name.trim() || "Plan",
+        forward: towForward,
+        straight: straightMode,
+        speed: speedSetting,
+        aircraft: aircraftName(),
+        start: { lat: startPosition.lat, lon: startPosition.lon, heading: startHeading },
+        stops: stops.map(function (s) { return { lat: s.lat, lon: s.lon, heading: s.heading }; }),
+        saved: Date.now()
+    };
+
+    const list = loadStore();
+    list.push(entry);
+
+    if (writeStore(list)) {
+        try { localStorage.setItem(STORE_LAST_AIRPORT_KEY, entry.airport); } catch (e) {}
+        notify("SAVED: " + entry.airport + " — " + entry.name);
+    }
+}
+
+function createSavedMenu() {
+    if (document.getElementById("y-pb-saved")) return;
+
+    const m = document.createElement("div");
+    m.id = "y-pb-saved";
+    m.style.cssText = `
+        position:fixed;
+        top:50%;
+        left:50%;
+        transform:translate(-50%,-50%) scale(${UI_SCALE});
+        z-index:1000001;
+        display:none;
+        background:rgba(8,10,12,.97);
+        color:#fff;
+        border:1px solid rgba(255,255,255,.22);
+        border-radius:12px;
+        padding:16px 18px;
+        min-width:340px;
+        max-width:92vw;
+        max-height:70vh;
+        overflow:auto;
+        font-family:Arial,sans-serif;
+        box-shadow:0 8px 40px rgba(0,0,0,.6);
+    `;
+
+    m.addEventListener("click", function (e) {
+        const b = e.target.closest("button");
+        if (!b) return;
+
+        const act = b.dataset.act;
+        if (act === "close") closeSaved();
+        else if (act === "load") loadSaved(b.dataset.id);
+        else if (act === "del") {
+            if (window.confirm("Delete this saved plan?")) {
+                writeStore(loadStore().filter(function (s) { return s.id !== b.dataset.id; }));
+                renderSaved();
+            }
+        }
+        b.blur();
+    });
+
+    document.body.appendChild(m);
+}
+
+function renderSaved() {
+    const m = document.getElementById("y-pb-saved");
+    if (!m) return;
+
+    const list = loadStore();
+    const groups = {};
+
+    list.forEach(function (s) {
+        (groups[s.airport || "UNSORTED"] = groups[s.airport || "UNSORTED"] || []).push(s);
+    });
+
+    let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">' +
+        '<div style="font-size:17px;font-weight:bold;">Saved plans</div>' +
+        '<button class="ypb-btn" style="padding:4px 10px;" data-act="close">✕</button></div>';
+
+    const airports = Object.keys(groups).sort();
+
+    if (!airports.length) {
+        html += '<div style="opacity:.7;font-size:13px;">Nothing saved yet. Plan a route, then press “💾 Save plan”.</div>';
+    }
+
+    airports.forEach(function (ap) {
+        html += '<div style="margin:12px 0 5px;font-size:13px;font-weight:bold;color:#7cc4ff;">' + escapeHtml(ap) + '</div>';
+
+        groups[ap].forEach(function (s) {
+            html += '<div style="display:flex;align-items:center;gap:8px;margin:4px 0;">' +
+                '<div style="flex:1;font-size:13px;">' + escapeHtml(s.name) +
+                '<div style="font-size:11px;opacity:.6;">' + (s.forward ? "Pull forward" : "Pushback") + ' • ' +
+                s.stops.length + ' stop(s) • ' + Number(s.speed || PUSHBACK_SPEED).toFixed(1) + ' m/s' +
+                (s.aircraft ? ' • ' + escapeHtml(s.aircraft) : '') + '</div></div>' +
+                '<button class="ypb-btn" style="padding:5px 10px;" data-act="load" data-id="' + escapeHtml(s.id) + '">Load</button>' +
+                '<button class="ypb-btn ypb-stop" style="padding:5px 10px;" data-act="del" data-id="' + escapeHtml(s.id) + '">🗑</button>' +
+                '</div>';
+        });
+    });
+
+    m.innerHTML = html;
+}
+
+function openSaved() {
+    if (pushing) { notify("STOP THE CURRENT MOVEMENT FIRST"); return; }
+    renderSaved();
+    const m = document.getElementById("y-pb-saved");
+    if (m) m.style.display = "block";
+}
+
+function closeSaved() {
+    const m = document.getElementById("y-pb-saved");
+    if (m) m.style.display = "none";
+}
+
+function savedOpen() {
+    const m = document.getElementById("y-pb-saved");
+    return !!m && m.style.display !== "none";
+}
+
+// Loads a saved plan into the planner. Press READY afterwards to start.
+function loadSaved(id) {
+    const entry = loadStore().find(function (s) { return s.id === id; });
+    closeSaved();
+    if (!entry || pushing) return;
+
+    enterPlanning(!!entry.forward);
+    straightMode = !!entry.straight;
+
+    speedSetting = clamp(Number(entry.speed) || PUSHBACK_SPEED, SPEED_MIN, SPEED_MAX);
+
+    const list = entry.stops.map(function (s) { return { lat: s.lat, lon: s.lon, heading: s.heading }; });
+
+    if (!buildChain(list)) {
+        buildChain([]);
+        notify("CAN'T FOLLOW THIS PLAN FROM HERE — PARK AT THE SAVED START");
+        updatePanel();
+        return;
+    }
+
+    stops = list;
+    preview = null;
+    finalHeading = stops[stops.length - 1].heading;
+
+    let msg = "LOADED: " + entry.airport + " — " + entry.name + " — PRESS READY";
+
+    if (entry.start && distance(startPosition, entry.start) > SAVED_START_WARN_M) {
+        msg += "  (plane is " + Math.round(distance(startPosition, entry.start)) + " m from the saved start)";
+    }
+
+    notify(msg);
+    updateDistanceUI(routeTotalLength);
+    updateHeadingUI();
+    updatePanel();
+}
+
+// ============================================================
+// PLANNER CANVAS
+// ============================================================
+
+function createPlannerCanvas() {
+    if (document.getElementById("y-pushback-planner")) return;
+
+    plannerCanvas = document.createElement("canvas");
+    plannerCanvas.id = "y-pushback-planner";
+
+    plannerCanvas.style.cssText = `
+        position:fixed;
+        inset:0;
+        width:100vw;
+        height:100vh;
+        z-index:999998;
+        display:none;
+        pointer-events:auto;
+        cursor:crosshair;
+    `;
+
+    document.body.appendChild(plannerCanvas);
+    plannerCtx = plannerCanvas.getContext("2d");
+
+    resizePlanner();
+    window.addEventListener("resize", resizePlanner);
+
+    plannerCanvas.addEventListener("mousemove", plannerMouseMove);
+    plannerCanvas.addEventListener("click", plannerClick);
+
+    // Cursor left the map (e.g. onto the buttons): drop the hover preview,
+    // so the rotate buttons act on the last confirmed stop.
+    plannerCanvas.addEventListener("mouseleave", function () {
+        if (!selecting || !preview) return;
+        preview = null;
+        rebuildRoute();
+    });
+
+    // Right-click: undo the last stop, or cancel when there are none.
+    plannerCanvas.addEventListener("contextmenu", function (event) {
+        event.preventDefault();
+        if (!selecting) return;
+        if (stops.length) undoStop();
+        else cancelSelection();
+    });
+
+    // Mouse wheel = rotate the heading of the stop.
+    // Shift = fine steps, Ctrl = zoom the top view.
+    plannerCanvas.addEventListener(
+        "wheel",
+        function (event) {
+            event.preventDefault();
+
+            const dir = (event.deltaY || event.deltaX) > 0 ? 1 : -1;
+
+            if (event.ctrlKey) {
+                cameraHeight = clamp(
+                    cameraHeight * (dir > 0 ? 1.12 : 1 / 1.12),
+                    CAMERA_HEIGHT_MIN,
+                    CAMERA_HEIGHT_MAX
+                );
+                return;
+            }
+
+            if (!selecting) return;
+
+            rotateFinalHeading(
+                dir * (event.shiftKey ? ROTATE_STEP_FINE_DEG : ROTATE_STEP_DEG)
+            );
+        },
+        { passive: false }
+    );
+}
+
+// Heading the nose must have so the aircraft travels straight from `from` to `to`.
+function lineHeading(from, to) {
+    const l = geoToLocal(from, to);
+    return noseHeadingForTravel(degrees(Math.atan2(l.x, l.y)));
+}
+
+// Straight mode: every stop's heading follows the line that leads to it.
+function straightenStops() {
+    let prev = startPosition;
+    stops.forEach(function (s) {
+        s.heading = lineHeading(prev, s);
+        prev = s;
+    });
+    finalHeading = stops.length ? stops[stops.length - 1].heading : startHeading;
+}
+
+function toggleStraight() {
+    if (!selecting) return;
+
+    const oldStops = stops.map(function (s) { return { lat: s.lat, lon: s.lon, heading: s.heading }; });
+    const oldFinal = finalHeading;
+
+    straightMode = !straightMode;
+    preview = null;
+    if (straightMode) straightenStops();
+
+    if (!rebuildRoute()) {
+        straightMode = !straightMode;
+        stops = oldStops;
+        finalHeading = oldFinal;
+        rebuildRoute();
+        notify("CAN'T STRAIGHTEN THIS ROUTE — UNDO OR MOVE A STOP");
+        updatePanel();
+        return;
+    }
+
+    notify(straightMode ? "STRAIGHT LINES ON — HEADING FOLLOWS THE LINE" : "STRAIGHT LINES OFF — CURVED ROUTE");
+    updateDistanceUI(routeTotalLength);
+    updateHeadingUI();
+    updatePanel();
+}
+
+// Rotates the stop being placed (the hover preview), or the last
+// confirmed stop when nothing is under the cursor.
+function rotateFinalHeading(delta) {
+    if (straightMode) {
+        notify("STRAIGHT MODE — HEADING FOLLOWS THE LINE (PRESS L TO TURN OFF)");
+        return;
+    }
+
+    finalHeading = normalizeAngle(finalHeading + delta);
+
+    if (preview) {
+        preview.heading = finalHeading;
+    } else if (stops.length) {
+        stops[stops.length - 1].heading = finalHeading;
+    }
+
+    rebuildRoute();
+    updateDistanceUI(routeTotalLength);
+    updateHeadingUI();
+}
+
+function resizePlanner() {
+    if (!plannerCanvas) return;
+
+    const dpr = window.devicePixelRatio || 1;
+
+    plannerCanvas.width = window.innerWidth * dpr;
+    plannerCanvas.height = window.innerHeight * dpr;
+    plannerCanvas.style.width = window.innerWidth + "px";
+    plannerCanvas.style.height = window.innerHeight + "px";
+
+    if (plannerCtx) plannerCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function showPlanner() {
+    if (plannerCanvas) plannerCanvas.style.display = "block";
+}
+
+function hidePlanner() {
+    if (plannerCanvas) plannerCanvas.style.display = "none";
+}
+
+// ============================================================
+// PLANE TEXTURE
+// ============================================================
+
+// Starts loading the images of the current aircraft.
+function loadPlaneTexture() {
+    planeSpec();
+}
+
+// Finds the aircraft inside the picture (ignores the empty margin) and
+// returns its bounding box in image pixels: {x, y, w, h}.
+function computeCrop(img) {
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    const full = { x: 0, y: 0, w: W, h: H, cropped: false };
+
+    try {
+        const k = Math.min(1, CROP_ANALYSE_SIZE / Math.max(W, H));
+        const cw = Math.max(1, Math.round(W * k));
+        const ch = Math.max(1, Math.round(H * k));
+
+        const c = document.createElement("canvas");
+        c.width = cw;
+        c.height = ch;
+
+        const g = c.getContext("2d", { willReadFrequently: true });
+        g.drawImage(img, 0, 0, cw, ch);
+
+        const d = g.getImageData(0, 0, cw, ch).data;
+
+        // Background = the four corners. Transparent corners -> use alpha,
+        // otherwise compare colours with the corner colour.
+        const corners = [
+            0,
+            (cw - 1) * 4,
+            (ch - 1) * cw * 4,
+            ((ch - 1) * cw + (cw - 1)) * 4
+        ];
+
+        let transparentBg = true;
+        let br = 0, bg = 0, bb = 0;
+
+        corners.forEach(function (o) {
+            if (d[o + 3] >= CROP_ALPHA_MIN) transparentBg = false;
+            br += d[o]; bg += d[o + 1]; bb += d[o + 2];
+        });
+
+        br /= 4; bg /= 4; bb /= 4;
+
+        let minX = cw, minY = ch, maxX = -1, maxY = -1;
+
+        for (let y = 0; y < ch; y++) {
+            for (let x = 0; x < cw; x++) {
+                const o = (y * cw + x) * 4;
+                if (d[o + 3] < CROP_ALPHA_MIN) continue;
+
+                if (!transparentBg) {
+                    const diff = Math.max(
+                        Math.abs(d[o] - br),
+                        Math.abs(d[o + 1] - bg),
+                        Math.abs(d[o + 2] - bb)
+                    );
+                    if (diff <= CROP_COLOR_DIFF) continue;
+                }
+
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+
+        if (maxX < minX || maxY < minY) return full;
+
+        const x0 = Math.max(0, Math.floor(minX / k));
+        const y0 = Math.max(0, Math.floor(minY / k));
+        const x1 = Math.min(W, Math.ceil((maxX + 1) / k));
+        const y1 = Math.min(H, Math.ceil((maxY + 1) / k));
+
+        const box = { x: x0, y: y0, w: x1 - x0, h: y1 - y0, cropped: true,
+            bg: transparentBg ? null : { r: br, g: bg, b: bb } };
+
+        // Something went wrong (almost nothing found): use the whole image.
+        if (box.w < W * 0.08 || box.h < H * 0.08) return full;
+
+        return box;
+    } catch (e) {
+        // Image from another site without CORS: pixels can't be read.
+        console.warn("[Y Pushback] Can't read image pixels to crop it (CORS) — using the whole image.", e);
+        return full;
+    }
+}
+
+// Loads (once) and returns the cache slot for an image file name.
+function getTexture(file) {
+    const url = IMG + file;
+    let slot = textureCache[url];
+    if (slot) return slot;
+
+    slot = textureCache[url] = { img: null, loaded: false, crop: null, failed: false };
+
+    let triedWithoutCors = false;
+
+    function load(useCors) {
+        const img = new Image();
+        if (useCors) img.crossOrigin = "anonymous";
+
+        img.onload = function () {
+            slot.img = img;
+            slot.crop = computeCrop(img);
+            slot.loaded = true;
+            console.log("[Y Pushback] texture loaded:", file,
+                img.naturalWidth + "x" + img.naturalHeight,
+                "aircraft area:", slot.crop.w + "x" + slot.crop.h,
+                slot.crop.cropped ? "(cropped)" : "(not cropped)");
+        };
+
+        img.onerror = function () {
+            slot.loaded = false;
+            // Retry without CORS: the image can still be drawn, just not cropped.
+            if (!triedWithoutCors) {
+                triedWithoutCors = true;
+                load(false);
+            } else {
+                slot.failed = true;
+                console.warn("[Y Pushback] texture failed to load:", file);
+            }
+        };
+
+        img.src = url;
+    }
+
+    load(true);
+    return slot;
+}
+
+// Is the sun below the horizon at the aircraft (in GeoFS's own clock)?
+function isNight() {
+    const now = performance.now();
+    if (now - nightCache.t < 2000) return nightCache.value;
+
+    let night = false;
+
+    try {
+        const C = window.Cesium;
+        const viewer = geofs.api.viewer;
+        const p = getPosition();
+        const jd = viewer.clock.currentTime;
+
+        const sunInertial =
+            C.Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame(jd);
+
+        const m = C.Transforms.computeTemeToPseudoFixedMatrix(jd);
+        const sun = C.Matrix3.multiplyByVector(m, sunInertial, new C.Cartesian3());
+        C.Cartesian3.normalize(sun, sun);
+
+        const up = C.Ellipsoid.WGS84.geodeticSurfaceNormal(
+            C.Cartesian3.fromDegrees(p.lon, p.lat, 0),
+            new C.Cartesian3()
+        );
+
+        night = C.Cartesian3.dot(sun, up) < NIGHT_SUN_THRESHOLD;
+    } catch (e) {
+        night = false;
+    }
+
+    nightCache = { t: now, value: night };
+    return night;
+}
+
+// The day or night picture of the current aircraft: {img, crop} or null.
+function currentTexture() {
+    const spec = planeSpec();
+    if (!spec) return null;
+
+    const day = getTexture(spec.tex.day);
+    const night = getTexture(spec.tex.night);
+
+    const first = isNight() ? night : day;
+    const second = isNight() ? day : night;
+
+    if (first.loaded && first.img && first.img.naturalWidth > 0) return first;
+    if (second.loaded && second.img && second.img.naturalWidth > 0) return second;
+    return null;
+}
+
+// ============================================================
+// SCREEN <-> GROUND
+// ============================================================
+
+function canvasRect() {
+    return geofs.api.viewer.canvas.getBoundingClientRect();
+}
+
+function getGroundPoint(clientX, clientY) {
+    const viewer = geofs.api.viewer;
+    const Cesium = window.Cesium;
+
+    try {
+        const r = canvasRect();
+        const pos = new Cesium.Cartesian2(clientX - r.left, clientY - r.top);
+
+        let position = null;
+
+        const ray = viewer.camera.getPickRay(pos);
+        if (ray) position = viewer.scene.globe.pick(ray, viewer.scene);
+
+        if (!position) {
+            position = viewer.camera.pickEllipsoid(pos, Cesium.Ellipsoid.WGS84);
+        }
+
+        if (!position) return null;
+
+        const c = Cesium.Cartographic.fromCartesian(position);
+        return { lat: degrees(c.latitude), lon: degrees(c.longitude) };
+    } catch (e) {
+        console.error("[Y Pushback] Ground pick error:", e);
+        return null;
+    }
+}
+
+// Geo point -> screen pixels, using the real Cesium camera.
+function getScreenPosition(point, alt) {
+    if (!point) return null;
+
+    if (alt === undefined) {
+        alt = startPosition ? startPosition.alt : (getPosition() || {}).alt || 0;
+    }
+
+    try {
+        const Cesium = window.Cesium;
+        const viewer = geofs.api.viewer;
+
+        const cart = Cesium.Cartesian3.fromDegrees(point.lon, point.lat, alt);
+
+        // Ignore anything behind the camera.
+        const cam = viewer.camera;
+        const toPoint = Cesium.Cartesian3.subtract(cart, cam.positionWC, new Cesium.Cartesian3());
+        if (Cesium.Cartesian3.dot(toPoint, cam.directionWC) <= 0) return null;
+
+        const fn =
+            Cesium.SceneTransforms.worldToWindowCoordinates ||
+            Cesium.SceneTransforms.wgs84ToWindowCoordinates;
+
+        const w = fn.call(Cesium.SceneTransforms, viewer.scene, cart);
+        if (!w) return null;
+
+        const r = canvasRect();
+        return { x: w.x + r.left, y: w.y + r.top };
+    } catch (e) {
+        return null;
+    }
+}
+
+// ============================================================
+// BUILD ROUTE (chain of segments, one per stop)
+// ============================================================
+
+// One segment: from `o` (local metres) travelling along `heading`'s travel
+// direction (backwards for pushback, forwards for pull), ending at `t`
+// while travelling along `endHeading`'s travel direction.
+// The path is: straight leg -> smooth curve -> straight run-in to the stop.
+// Returns an array of local points, or null if the stop can't be reached.
+function buildSegment(o, heading, t, endHeading) {
+    const dx = t.x - o.x;
+    const dy = t.y - o.y;
+
+    if (Math.hypot(dx, dy) < 1) return null;
+
+    const tr = travelDir(heading);
+    const rearX = tr.x;
+    const rearY = tr.y;
+
+    const bearingToTarget = normalizeAngle(degrees(Math.atan2(dx, dy)));
+    const angleFromRear = Math.abs(
+        angleDifference(bearingToTarget, normalizeAngle(travelHeading(heading)))
+    );
+
+    if (angleFromRear > MAX_LATERAL_ANGLE) return null;
+
+    // Straight mode: a plain straight line from o to t.
+    if (straightMode) {
+        const len = Math.hypot(dx, dy);
+        const n = Math.max(2, Math.ceil(len / 2));
+        const line = [];
+        for (let i = 0; i <= n; i++) {
+            line.push({ x: o.x + dx * i / n, y: o.y + dy * i / n });
+        }
+        return line;
+    }
+
+    // 1) a straight leg dead along the travel direction, 2) a smooth curve,
+    // 3) a straight run-in lined up with the stop's heading.
+    const rearProj = dx * rearX + dy * rearY;
+    let straight = 0;
+
+    if (rearProj > STRAIGHT_MIN_DISTANCE) {
+        straight = clamp(rearProj * STRAIGHT_FRACTION, 0, STRAIGHT_MAX);
+    }
+
+    const S = { x: o.x + rearX * straight, y: o.y + rearY * straight };
+
+    // The tug arrives travelling along ITS final heading's travel direction.
+    const endTr = travelDir(endHeading);
+    const endRearX = endTr.x;
+    const endRearY = endTr.y;
+
+    // The curve ends at E, a few metres before the stop; E -> stop is a straight run-in.
+    const dTotal = Math.hypot(t.x - S.x, t.y - S.y);
+    const endStraight = Math.min(END_STRAIGHT_M, dTotal * END_STRAIGHT_MAX_FRACTION);
+
+    const E = { x: t.x - endRearX * endStraight, y: t.y - endRearY * endStraight };
+
+    const d2 = Math.hypot(E.x - S.x, E.y - S.y);
+    const k1 = clamp(d2 * 0.5, 8, 60);
+    const k2 = clamp(d2 * 0.4, 7, 45);
+
+    const c1 = { x: S.x + rearX * k1, y: S.y + rearY * k1 };
+    const c2 = { x: E.x - endRearX * k2, y: E.y - endRearY * k2 };
+
+    const pts = [];
+
+    if (straight > 0) {
+        const n = Math.max(2, Math.ceil(straight / 2));
+        for (let i = 0; i < n; i++) {
+            pts.push({
+                x: o.x + rearX * straight * i / n,
+                y: o.y + rearY * straight * i / n
+            });
+        }
+    }
+
+    const STEPS = 80;
+
+    for (let i = 0; i <= STEPS; i++) {
+        const u = i / STEPS;
+        const mu = 1 - u;
+
+        pts.push({
+            x: mu * mu * mu * S.x + 3 * mu * mu * u * c1.x + 3 * mu * u * u * c2.x + u * u * u * E.x,
+            y: mu * mu * mu * S.y + 3 * mu * mu * u * c1.y + 3 * mu * u * u * c2.y + u * u * u * E.y
+        });
+    }
+
+    // Straight run-in from E to the stop.
+    if (endStraight > 0.5) {
+        const n = Math.max(2, Math.ceil(endStraight / 2));
+        for (let i = 1; i <= n; i++) {
+            pts.push({
+                x: E.x + (t.x - E.x) * i / n,
+                y: E.y + (t.y - E.y) * i / n
+            });
+        }
+    }
+
+    return pts;
+}
+
+// Builds the whole route through `list` (array of {lat, lon, heading}).
+// On failure nothing is changed and false is returned.
+function buildChain(list) {
+    if (!startPosition) return false;
+
+    const pts = [];
+    const endIdx = [];
+
+    let prev = { x: 0, y: 0 };
+    let prevHeading = startHeading;
+
+    for (let s = 0; s < list.length; s++) {
+        const tl = geoToLocal(startPosition, list[s]);
+        const seg = buildSegment(prev, prevHeading, tl, list[s].heading);
+
+        if (!seg) return false;
+
+        for (let i = pts.length ? 1 : 0; i < seg.length; i++) pts.push(seg[i]);
+
+        endIdx.push(pts.length - 1);
+        prev = tl;
+        prevHeading = list[s].heading;
+    }
+
+    const lens = [0];
+    let total = 0;
+
+    for (let i = 1; i < pts.length; i++) {
+        total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+        lens.push(total);
+    }
+
+    routePoints = pts;
+    routeLengths = lens;
+    routeTotalLength = total;
+    stopEnds = endIdx.map(function (i) { return lens[i]; });
+
+    return true;
+}
+
+// Rebuild the drawn route from the confirmed stops (+ the hover preview).
+function rebuildRoute() {
+    const list = stops.concat(preview ? [preview] : []);
+
+    if (buildChain(list)) return true;
+
+    // The preview can't be reached: drop it and keep the confirmed route.
+    preview = null;
+    buildChain(stops);
+    return false;
+}
+
+function getRoutePointAtDistance(distanceAlong) {
+    if (!routePoints.length) return null;
+
+    distanceAlong = clamp(distanceAlong, 0, routeTotalLength);
+
+    for (let i = 1; i < routeLengths.length; i++) {
+        if (routeLengths[i] >= distanceAlong) {
+            const previous = routeLengths[i - 1];
+            const segment = routeLengths[i] - previous;
+            const t = segment <= 0 ? 0 : (distanceAlong - previous) / segment;
+
+            return {
+                x: lerp(routePoints[i - 1].x, routePoints[i].x, t),
+                y: lerp(routePoints[i - 1].y, routePoints[i].y, t)
+            };
+        }
+    }
+
+    return routePoints[routePoints.length - 1];
+}
+
+// Nearest point on the route, searched only around the progress made so far,
+// so routes that pass close to themselves don't make the plane jump ahead.
+function findNearestRouteDistance(localPosition) {
+    if (!routePoints.length) return 0;
+
+    function search(lo, hi) {
+        let bestIndex = -1;
+        let best = Infinity;
+
+        for (let i = 0; i < routePoints.length; i++) {
+            if (routeLengths[i] < lo || routeLengths[i] > hi) continue;
+
+            const dx = routePoints[i].x - localPosition.x;
+            const dy = routePoints[i].y - localPosition.y;
+            const d = dx * dx + dy * dy;
+            if (d < best) { best = d; bestIndex = i; }
+        }
+
+        return bestIndex;
+    }
+
+    let idx = search(routeProgress - 8, routeProgress + 60);
+    if (idx < 0) idx = search(-Infinity, Infinity);
+
+    return idx < 0 ? 0 : routeLengths[idx];
+}
+
+function getRouteTangent(distanceAlong) {
+    const sample = 2;
+
+    const a = getRoutePointAtDistance(Math.max(0, distanceAlong - sample));
+    const b = getRoutePointAtDistance(Math.min(routeTotalLength, distanceAlong + sample));
+
+    if (!a || !b) return { x: 0, y: 0 };
+
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+
+    if (len < 0.001) return { x: 0, y: 0 };
+
+    return { x: dx / len, y: dy / len };
+}
+
+// ============================================================
+// COLLISION CHECK
+// ============================================================
+// Samples the scene height at points along the aircraft's footprint
+// (fuselage, wings, tail). Anything clearly taller than the ground there
+// (buildings, vehicles, other aircraft...) counts as a hit. The aircraft you
+// are flying is ignored. Online aircraft are also checked by distance.
+
+const collisionCache = {};
+let collisionCount = 0;
+let collisionBudgetEnd = 0;
+let collisionWarn = false;
+let collisionNoteShown = false;
+
+function clearCollisionCache() {
+    for (const k in collisionCache) delete collisionCache[k];
+    collisionCount = 0;
+}
+
+function collisionSupported() {
+    if (!COLLISION_CHECK) return false;
+
+    try {
+        const s = geofs.api.viewer.scene;
+        return typeof s.sampleHeight === "function" && s.sampleHeightSupported !== false;
+    } catch (e) {
+        return false;
+    }
+}
+
+// Points (geo) covering the aircraft's footprint at `center`, nose along `heading`.
+function footprintPoints(center, heading, light) {
+    const L = planeLength();
+    const S = L * COLLISION_SPAN_RATIO;
+    const halfL = L / 2 + COLLISION_MARGIN_M;
+    const halfS = S / 2 + COLLISION_MARGIN_M;
+
+    const h = radians(heading);
+    const sh = Math.sin(h);
+    const ch = Math.cos(h);
+    const pts = [];
+
+    function add(fwd, right) {
+        pts.push(localToGeo(center, { x: fwd * sh + right * ch, y: fwd * ch - right * sh }));
+    }
+
+    const fus = light ? 2 : 4;           // fuselage points per side of the centre
+    for (let i = -fus; i <= fus; i++) add(i / fus * halfL, 0);
+
+    for (let i = -2; i <= 2; i++) {      // wings
+        if (i) add(L * 0.05, i / 2 * halfS);
+    }
+
+    if (!light) {                        // tailplane
+        add(-L * 0.42, -S * 0.18);
+        add(-L * 0.42, S * 0.18);
+    }
+
+    return pts;
+}
+
+function insideOwnFootprint(geo, own) {
+    if (!own) return false;
+
+    const l = geoToLocal(own.pos, geo);
+    const h = radians(own.heading);
+    const fwd = l.x * Math.sin(h) + l.y * Math.cos(h);
+    const right = l.x * Math.cos(h) - l.y * Math.sin(h);
+    const L = planeLength();
+
+    return Math.abs(fwd) < L / 2 + 3 && Math.abs(right) < L * COLLISION_SPAN_RATIO / 2 + 3;
+}
+
+function pointBlocked(geo) {
+    const C = window.Cesium;
+    const scene = geofs.api.viewer.scene;
+    const carto = C.Cartographic.fromDegrees(geo.lon, geo.lat);
+
+    let top, ground;
+
+    try { top = scene.sampleHeight(carto); } catch (e) { return false; }
+    if (typeof top !== "number" || !isFinite(top)) return false;
+
+    try { ground = scene.globe.getHeight(carto); } catch (e) {}
+    if (typeof ground !== "number" || !isFinite(ground)) return false;
+
+    return top - ground > COLLISION_OBSTACLE_HEIGHT_M;
+}
+
+// Another online aircraft close to `center`?
+function multiplayerNear(center, own) {
+    try {
+        const users = window.multiplayer && multiplayer.visibleUsers;
+        if (!users) return false;
+
+        const list = Array.isArray(users) ? users : Object.values(users);
+        const limit = planeLength() / 2 + COLLISION_MP_EXTRA_M;
+
+        for (let i = 0; i < list.length; i++) {
+            const u = list[i];
+            const lla = u && ((u.referencePoint && u.referencePoint.lla) || u.coordinates ||
+                (u.lastUpdate && u.lastUpdate.co));
+
+            if (!Array.isArray(lla) || !Number.isFinite(lla[0]) || !Number.isFinite(lla[1])) continue;
+
+            const p = { lat: lla[0], lon: lla[1] };
+
+            if (own && distance(own.pos, p) < 3) continue;                       // that's us
+            if (Number.isFinite(lla[2]) && own && Math.abs(lla[2] - own.pos.alt) > 30) continue;   // flying overhead
+
+            if (distance(center, p) < limit) return true;
+        }
+    } catch (e) {}
+
+    return false;
+}
+
+function evalPose(center, heading, light) {
+    const p = getPosition();
+    const own = p ? { pos: p, heading: getAircraftHeading() } : null;
+
+    const hits = [];
+    const pts = footprintPoints(center, heading, light);
+
+    for (let i = 0; i < pts.length; i++) {
+        if (insideOwnFootprint(pts[i], own)) continue;
+        if (pointBlocked(pts[i])) hits.push(pts[i]);
+    }
+
+    return { hit: hits.length > 0 || multiplayerNear(center, own), hits: hits, t: performance.now() };
+}
+
+// Cached check. Results are refreshed after `ttl` ms, a little at a time so
+// the game never stalls.
+function getCollision(center, heading, ttl, light) {
+    const key = center.lat.toFixed(6) + "," + center.lon.toFixed(6) + "," + Math.round(heading) + (light ? "L" : "F");
+    const now = performance.now();
+    const c = collisionCache[key];
+
+    if (c && now - c.t < ttl) return c;
+    if (now > collisionBudgetEnd) return c || null;
+
+    if (collisionCount > 600) clearCollisionCache();
+
+    const r = evalPose(center, heading, light);
+    if (!collisionCache[key]) collisionCount++;
+    collisionCache[key] = r;
+    return r;
+}
+
+// Poses along the route where the aircraft would hit something.
+function pathCollisions() {
+    const out = [];
+    if (routeTotalLength < 1) return out;
+
+    for (let d = COLLISION_PATH_STEP_M; d < routeTotalLength; d += COLLISION_PATH_STEP_M) {
+        if (pushing && d < routeProgress) continue;
+
+        const lp = getRoutePointAtDistance(d);
+        const t = getRouteTangent(d);
+        if (!lp || (!t.x && !t.y)) continue;
+
+        const center = localToGeo(startPosition, lp);
+        const heading = noseHeadingForTravel(degrees(Math.atan2(t.x, t.y)));
+        const c = getCollision(center, heading, 3000, true);
+
+        if (c && c.hit) out.push({ center: center, heading: heading, hits: c.hits });
+    }
+
+    return out;
+}
+
+// Line through the aircraft along its heading: green ahead of the nose, red behind the tail.
+function drawHeadingAxis(ctx, geo, alt, heading) {
+    const L = planeLength();
+    const h = radians(heading);
+    const dir = { x: Math.sin(h), y: Math.cos(h) };
+
+    function line(from, to, color) {
+        const a = getScreenPosition(localToGeo(geo, { x: dir.x * from, y: dir.y * from }), alt);
+        const b = getScreenPosition(localToGeo(geo, { x: dir.x * to, y: dir.y * to }), alt);
+        if (!a || !b) return;
+
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    line(L / 2, L / 2 + 80, COLOR_PLACED);       // ahead of the nose
+    line(-L / 2, -L / 2 - 80, COLOR_BLOCKED);    // behind the tail
+    ctx.restore();
+}
+
+function drawHitDots(ctx, hits, alt) {
+    ctx.save();
+    ctx.fillStyle = COLOR_BLOCKED;
+    ctx.strokeStyle = "rgba(255,255,255,.9)";
+    ctx.lineWidth = 1.5;
+
+    hits.forEach(function (g) {
+        const s = getScreenPosition(g, alt);
+        if (!s) return;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+    });
+
+    ctx.restore();
+}
+
+// ============================================================
+// DRAWING
+// ============================================================
+
+function drawPlanner() {
+    if (!plannerCtx || !plannerCanvas) return;
+    if (plannerCanvas.style.display === "none") return;
+
+    const ctx = plannerCtx;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (!startPosition) return;
+    if (!overheadActive && !SHOW_OVERLAY_IN_FREE_CAMERA) return;
+
+    if (routePoints.length) drawRoute(ctx);
+
+    const items = [];
+
+    stops.forEach(function (s, i) {
+        if (pushing && i < stopIndex) return;   // already reached
+        items.push({ s: s, n: i + 1, alpha: 0.85, ttl: 2500, state: "placed" });
+    });
+
+    if (preview) items.push({ s: preview, n: stops.length + 1, alpha: 0.9, ttl: 150, state: "placing" });
+
+    const alt = startPosition.alt;
+    const useCollision = collisionSupported();
+    let warn = false;
+
+    if (COLLISION_CHECK && !useCollision && !collisionNoteShown) {
+        collisionNoteShown = true;
+        console.warn("[Y Pushback] Collision check unavailable (scene.sampleHeight not supported).");
+    }
+
+    collisionBudgetEnd = performance.now() + COLLISION_FRAME_BUDGET_MS;
+
+    // Route legs first (drawn underneath), stops get the check budget first.
+    const results = items.map(function (item) {
+        return useCollision ? getCollision(item.s, item.s.heading, item.ttl, false) : null;
+    });
+
+    if (useCollision && routePoints.length) {
+        pathCollisions().forEach(function (p) {
+            warn = true;
+            drawGhostPlane(ctx, p.center, alt, p.heading, 0.3, "danger");
+            drawHitDots(ctx, p.hits, alt);
+        });
+    }
+
+    items.forEach(function (item, i) {
+        const c = results[i];
+        const danger = !!(c && c.hit);
+
+        if (danger) {
+            warn = true;
+            drawHitDots(ctx, c.hits, alt);
+        }
+
+        if (item.state === "placing" && SHOW_HEADING_AXIS) drawHeadingAxis(ctx, item.s, alt, item.s.heading);
+
+        const g = drawGhostPlane(ctx, item.s, alt, item.s.heading, item.alpha, danger ? "danger" : item.state);
+        if (g) {
+            const label = "STOP " + item.n + "  •  HDG " +
+                Math.round(item.s.heading).toString().padStart(3, "0") + "°" +
+                (danger ? "  •  BLOCKED" : "");
+            drawTargetLabel(ctx, g.x, g.y, planeLength() * g.ppm, label, danger);
+        }
+    });
+
+    if (warn !== collisionWarn) {
+        collisionWarn = warn;
+        updatePanel();
+    }
+
+    drawPlannerText(ctx, width, height);
+}
+
+// Draws a polyline given in local metres, skipping parts behind the camera.
+function strokeLocalLine(ctx, localPts, color, width) {
+    const segments = [];
+    let cur = [];
+
+    for (let i = 0; i < localPts.length; i++) {
+        const sp = getScreenPosition(localToGeo(startPosition, localPts[i]));
+        if (sp) {
+            cur.push(sp);
+        } else if (cur.length) {
+            segments.push(cur);
+            cur = [];
+        }
+    }
+    if (cur.length) segments.push(cur);
+
+    ctx.beginPath();
+    segments.forEach(function (pts) {
+        if (pts.length < 2) return;
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    });
+
+    ctx.lineWidth = width;
+    ctx.strokeStyle = color;
+    ctx.stroke();
+}
+
+// Blue centre line plus a purple line for each wingtip (the route shifted
+// sideways by half the wingspan).
+function drawRoute(ctx) {
+    if (routePoints.length < 2) return;
+
+    const half = planeLength() * planeSpanRatio() / 2;
+    const left = [];
+    const right = [];
+
+    for (let i = 0; i < routePoints.length; i++) {
+        const a = routePoints[Math.max(0, i - 1)];
+        const b = routePoints[Math.min(routePoints.length - 1, i + 1)];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+
+        // Unit vector to the right of the direction of travel.
+        const nx = dy / len;
+        const ny = -dx / len;
+        const p = routePoints[i];
+
+        right.push({ x: p.x + nx * half, y: p.y + ny * half });
+        left.push({ x: p.x - nx * half, y: p.y - ny * half });
+    }
+
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    strokeLocalLine(ctx, left, COLOR_WINGTIP, 2);
+    strokeLocalLine(ctx, right, COLOR_WINGTIP, 2);
+    strokeLocalLine(ctx, routePoints, COLOR_ROUTE, 3);
+
+    ctx.restore();
+}
+
+// The aircraft texture, true-to-scale, laid flat on the ground at the stop
+// (projected through the real camera) and rotated to the stop's heading.
+// Only the aircraft part of the image (empty margins cropped away) is used,
+// and it is scaled so its length equals the real aircraft length.
+// Copy of a texture coloured with `color` (keeps the aircraft's details), cached per colour.
+function tintedTexture(tex, color) {
+    tex.tints = tex.tints || {};
+    if (tex.tints[color]) return tex.tints[color];
+
+    const k = tex.crop;
+    const c = document.createElement("canvas");
+    c.width = k.w;
+    c.height = k.h;
+
+    const g = c.getContext("2d");
+    g.drawImage(tex.img, k.x, k.y, k.w, k.h, 0, 0, k.w, k.h);
+
+    // Pictures with a solid (non-transparent) background: remove the
+    // background first so only the aircraft gets coloured, not a rectangle.
+    if (k.bg) {
+        try {
+            const data = g.getImageData(0, 0, k.w, k.h);
+            const d = data.data;
+            for (let i = 0; i < d.length; i += 4) {
+                if (Math.max(Math.abs(d[i] - k.bg.r), Math.abs(d[i + 1] - k.bg.g), Math.abs(d[i + 2] - k.bg.b)) <= CROP_COLOR_DIFF) d[i + 3] = 0;
+            }
+            g.putImageData(data, 0, 0);
+        } catch (e) {}
+    }
+
+    g.globalCompositeOperation = "source-atop";
+    g.globalAlpha = TEXTURE_TINT_ALPHA;
+    g.fillStyle = color;
+    g.fillRect(0, 0, k.w, k.h);
+
+    tex.tints[color] = c;
+    return c;
+}
+
+// state: "placing" (yellow), "placed" (green) or "danger" (red). Returns the screen position.
+function drawGhostPlane(ctx, geo, alt, heading, alpha, state) {
+    const danger = state === "danger";
+    const c = getScreenPosition(geo, alt);
+    const e = getScreenPosition(localToGeo(geo, { x: 10, y: 0 }), alt);
+    const n = getScreenPosition(localToGeo(geo, { x: 0, y: 10 }), alt);
+
+    if (!c || !e || !n) return null;
+
+    const ex = { x: (e.x - c.x) / 10, y: (e.y - c.y) / 10 };
+    const ny = { x: (n.x - c.x) / 10, y: (n.y - c.y) / 10 };
+
+    const h = radians(heading);
+    const sh = Math.sin(h);
+    const ch = Math.cos(h);
+
+    const tex = GHOST_STYLE === "texture" ? currentTexture() : null;
+    const outline = !tex;
+
+    const nose = planeNose();
+    const lengthIsWidth = !!tex && (nose === 90 || nose === 270);
+
+    // Length of the aircraft in image pixels (cropped area only).
+    let unitsLen;
+    if (outline) unitsLen = 1000;
+    else if (tex) unitsLen = lengthIsWidth ? tex.crop.w : tex.crop.h;
+    else unitsLen = 120;
+
+    const m = planeLength() / unitsLen;
+
+    const uX = m * ch,  uY = -m * sh;
+    const vX = -m * sh, vY = -m * ch;
+
+    ctx.save();
+
+    ctx.transform(
+        uX * ex.x + uY * ny.x,
+        uX * ex.y + uY * ny.y,
+        vX * ex.x + vY * ny.x,
+        vX * ex.y + vY * ny.y,
+        c.x,
+        c.y
+    );
+
+    ctx.translate(0, -(PLANE_PIVOT_FROM_NOSE - 0.5) * unitsLen);
+
+    ctx.globalAlpha = alpha === undefined ? 0.85 : alpha;
+    ctx.shadowBlur = 0;
+
+    if (outline) {
+        ctx.globalAlpha = (alpha !== undefined && alpha < 0.5) ? 0.5 : 1;
+        const color = danger ? COLOR_BLOCKED : (state === "placed" ? COLOR_PLACED : COLOR_PLACING);
+        drawOutlineAircraft(ctx, color, planeSpanRatio(), 2.5 / (m * Math.hypot(ex.x, ex.y)));
+    } else if (tex) {
+        const k = tex.crop;
+        ctx.rotate(radians(-nose));
+        const color = danger ? COLOR_BLOCKED : (state === "placed" ? COLOR_PLACED : COLOR_PLACING);
+        ctx.drawImage(tintedTexture(tex, color), 0, 0, k.w, k.h, -k.w / 2, -k.h / 2, k.w, k.h);
+    } else {
+        drawFallbackAircraft(ctx, danger);
+    }
+
+    ctx.restore();
+
+    return { x: c.x, y: c.y, ppm: Math.hypot(ex.x, ex.y) };
+}
+
+// Flat outline of an airliner, nose up, 1000 units long, centred on (0,0).
+// `lw` = line width in these units (so it stays ~2.5 screen pixels).
+function drawOutlineAircraft(ctx, color, spanRatio, lw) {
+    const k = spanRatio / 0.9;            // 1 = a typical airliner
+    const wx = function (x) { return x * k; };
+
+    // Right half, from the nose back to the tail.
+    const R = [
+        [45, -370],
+        [45, -110],
+        [wx(450), 70],
+        [wx(440), 122],
+        [45, 150],
+        [45, 350],
+        [180, 440],
+        [175, 480],
+        [22, 462],
+        [10, 500]
+    ];
+
+    ctx.save();
+    ctx.lineJoin = "round";
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = color;
+
+    ctx.beginPath();
+    ctx.moveTo(0, -500);
+    ctx.quadraticCurveTo(45, -470, R[0][0], R[0][1]);
+    for (let i = 1; i < R.length; i++) ctx.lineTo(R[i][0], R[i][1]);
+    for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(-R[i][0], R[i][1]);
+    ctx.quadraticCurveTo(-45, -470, 0, -500);
+    ctx.closePath();
+
+    ctx.save();
+    ctx.globalAlpha *= OUTLINE_FILL_ALPHA;
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+    ctx.stroke();
+
+    // Engines
+    ctx.beginPath();
+    ctx.rect(wx(95), -150, 62, 115);
+    ctx.rect(-wx(95) - 62, -150, 62, 115);
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function drawFallbackAircraft(ctx, danger) {
+    ctx.save();
+
+    ctx.fillStyle = danger ? "rgba(255,50,50,.95)" : "rgba(230,235,240,.95)";
+    ctx.strokeStyle = "rgba(20,25,30,.95)";
+    ctx.lineWidth = 2;
+
+    function poly(points) {
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(0, -58);
+    ctx.quadraticCurveTo(8, -30, 7, 30);
+    ctx.quadraticCurveTo(6, 53, 0, 61);
+    ctx.quadraticCurveTo(-6, 53, -7, 30);
+    ctx.quadraticCurveTo(-8, -30, 0, -58);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    poly([[-7, -2], [-52, 17], [-55, 25], [-7, 17]]);
+    poly([[7, -2], [52, 17], [55, 25], [7, 17]]);
+    poly([[-6, 43], [-28, 54], [-25, 61], [0, 52]]);
+    poly([[6, 43], [28, 54], [25, 61], [0, 52]]);
+
+    ctx.restore();
+}
+
+function drawTargetLabel(ctx, x, y, planeLengthPx, label, danger) {
+    ctx.save();
+
+    const r = Math.max(14, planeLengthPx * 0.5);
+
+    ctx.font = "bold 13px Arial";
+    ctx.textAlign = "center";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(0,0,0,.7)";
+    ctx.fillStyle = danger ? "#ff6b6b" : "white";
+    ctx.strokeText(label, x, y + r + 18);
+    ctx.fillText(label, x, y + r + 18);
+
+    ctx.restore();
+}
+
+function drawPlannerText(ctx, width, height) {
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "rgba(0,0,0,.7)";
+
+    function text(str, y, font, fill) {
+        ctx.font = font;
+        ctx.fillStyle = fill;
+        ctx.strokeText(str, width / 2, y);
+        ctx.fillText(str, width / 2, y);
+    }
+
+    if (selecting) {
+        text("CLICK TO ADD STOPS " + sideWord() + " THE AIRCRAFT — THEN PRESS READY  (" + modeName() + ")", height - 55,
+            "bold 13px Arial", "rgba(255,255,255,.95)");
+        text("Wheel = rotate (Shift = fine)  •  Ctrl+wheel or [ ] = zoom  •  +/- = speed  •  S = save  •  Z / right-click = undo  •  R = reset heading  •  L = straight line  •  Enter = ready  •  Esc = cancel", height - 34,
+            "11px Arial", "rgba(255,255,255,.8)");
+    } else if (stops.length || pushing) {
+        text(modeName() + " ROUTE", height - 55, "bold 15px Arial", "rgba(255,255,255,.95)");
+        text(TOGGLE_VIEW_KEY.toUpperCase() + " = next camera  •  1-8 = pick camera  •  +/- = speed  •  Esc = stop", height - 34,
+            "12px Arial", "rgba(255,255,255,.8)");
+    }
+
+    if (collisionWarn) {
+        text("⚠ POSSIBLE COLLISION — SOMETHING IS IN THE WAY (RED)", 100, "bold 18px Arial", "#ff6b6b");
+    }
+
+    // North indicator.
+    ctx.textAlign = "center";
+    ctx.font = "bold 16px Arial";
+    ctx.fillStyle = "rgba(255,255,255,.9)";
+    ctx.strokeText("N", width - 35, 35);
+    ctx.fillText("N", width - 35, 35);
+    ctx.beginPath();
+    ctx.moveTo(width - 35, 42);
+    ctx.lineTo(width - 35, 62);
+    ctx.strokeStyle = "rgba(255,255,255,.8)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+// ============================================================
+// MOUSE / STOP EDITING
+// ============================================================
+
+// Shared by hover + click. Sets the hover preview; true when it is reachable.
+function planFromPoint(point) {
+    if (!point || !startPosition) return false;
+
+    const base = stops.length ? stops[stops.length - 1] : startPosition;
+    const where = stops.length ? "THE LAST STOP" : "THE AIRCRAFT";
+
+    if (distance(base, point) > MAX_PLANNER_DISTANCE) {
+        preview = null;
+        rebuildRoute();
+        notify("TOO FAR — MAX " + MAX_PLANNER_DISTANCE + " m FROM " + where);
+        return false;
+    }
+
+    preview = {
+        lat: point.lat,
+        lon: point.lon,
+        heading: straightMode ? lineHeading(base, point) : finalHeading
+    };
+
+    if (!rebuildRoute()) {
+        notify("CAN'T REACH THERE — MOVE CURSOR " + sideWord() + " " + where);
+        return false;
+    }
+
+    return true;
+}
+
+function plannerMouseMove(event) {
+    if (!selecting) return;
+
+    const point = getGroundPoint(event.clientX, event.clientY);
+    if (!point) return;
+
+    if (planFromPoint(point)) {
+        notify("STOP " + (stops.length + 1) + " PREVIEW — CLICK TO ADD");
+        updateDistanceUI(routeTotalLength);
+        updateHeadingUI();
+    }
+}
+
+// Click = confirm the stop under the cursor and keep planning.
+function plannerClick(event) {
+    if (!selecting) return;
+
+    const point = getGroundPoint(event.clientX, event.clientY);
+
+    if (!point) {
+        notify("GROUND NOT FOUND — TRY AGAIN");
+        return;
+    }
+
+    if (!planFromPoint(point)) return;
+
+    stops.push({ lat: preview.lat, lon: preview.lon, heading: preview.heading });
+    if (straightMode) finalHeading = preview.heading;
+    preview = null;
+    rebuildRoute();
+
+    notify("STOP " + stops.length + " ADDED — CLICK FOR ANOTHER, OR PRESS READY");
+    updateDistanceUI(routeTotalLength);
+    updateHeadingUI();
+    updatePanel();
+}
+
+function undoStop() {
+    if (!selecting || !stops.length) return;
+
+    stops.pop();
+    preview = null;
+
+    finalHeading = stops.length ? stops[stops.length - 1].heading : startHeading;
+
+    rebuildRoute();
+    updateDistanceUI(routeTotalLength);
+    updateHeadingUI();
+    updatePanel();
+
+    notify(stops.length ? stops.length + " STOP(S) LEFT" : "ALL STOPS REMOVED — CLICK " + sideWord() + " THE AIRCRAFT");
+}
+
+function clearStops() {
+    if (!selecting) return;
+
+    stops = [];
+    preview = null;
+    finalHeading = startHeading;
+
+    rebuildRoute();
+    updateDistanceUI(0);
+    updateHeadingUI();
+    updatePanel();
+
+    notify("ALL STOPS REMOVED — CLICK " + sideWord() + " THE AIRCRAFT");
+}
+
+// The READY button: lock the plan in and start moving.
+function confirmReady() {
+    if (!selecting) return;
+
+    if (!stops.length) {
+        notify("ADD AT LEAST ONE STOP FIRST");
+        return;
+    }
+
+    selecting = false;
+    preview = null;
+    rebuildRoute();
+
+    if (plannerCanvas) plannerCanvas.style.cursor = "default";
+
+    notify("READY — STARTING " + modeName());
+    updateDistanceUI(routeTotalLength);
+    updatePanel();
+
+    setTimeout(beginMovement, 300);
+}
+
+// ============================================================
+// START PLANNING MODE
+// ============================================================
+
+// forward = false: push back (Y).  forward = true: pull forward (T).
+function startPushbackMode(forward) {
+    if (!ready) {
+        notify("GeoFS IS STILL LOADING...");
+        return;
+    }
+
+    if (pushing) { stopPushback(); return; }
+    if (selecting) { cancelSelection(); return; }
+
+    enterPlanning(!!forward);
+}
+
+// Sets up the top-down planner from the aircraft's current position.
+function enterPlanning(forward) {
+    const current = getPosition();
+    if (!current) {
+        notify("AIRCRAFT POSITION NOT FOUND");
+        return;
+    }
+
+    closeSaved();
+
+    if (finishTimer) { clearTimeout(finishTimer); finishTimer = null; }
+
+    towForward = forward;
+    clearCollisionCache();
+    collisionWarn = false;
+
+    startPosition = current;
+    startHeading = getAircraftHeading();
+    finalHeading = startHeading;
+    resetYawControl();
+
+    stops = [];
+    preview = null;
+    stopEnds = [];
+    routePoints = [];
+    routeLengths = [];
+    routeTotalLength = 0;
+
+    selecting = true;
+
+    if (!oldCamera) saveCamera();
+
+    cameraMode = "top";
+    cameraHeight = CAMERA_HEIGHT_DEFAULT;
+    overheadActive = true;
+    orbitActive = false;
+    mountActive = false;
+    overlayActive = true;
+    applyOverheadCamera();
+
+    plannerCanvas.style.cursor = "crosshair";
+    plannerCanvas.style.pointerEvents = "auto";
+    showPlanner();
+
+    notify("CLICK " + sideWord() + " THE AIRCRAFT TO ADD A STOP  —  " + planeLabel());
+    updateHeadingUI();
+    updatePanel();
+}
+
+// ============================================================
+// MOVEMENT
+// ============================================================
+
+function beginMovement() {
+    const a = aircraft();
+
+    if (!a || !a.rigidBody || typeof a.rigidBody.setLinearVelocity !== "function") {
+        notify("ERROR: AIRCRAFT PHYSICS NOT FOUND");
+        console.error("[Y Pushback] rigidBody.setLinearVelocity unavailable.");
+        return;
+    }
+
+    if (!stops.length || routePoints.length < 2) {
+        notify("NO VALID ROUTE");
+        return;
+    }
+
+    pushing = true;
+    resetCameraSmoothing();
+    releaseBrakes();
+    smoothVel = { x: 0, y: 0 };
+    smoothTarget = null;
+    smoothYawRate = 0;
+    currentSpeed = 0;
+    measuredSpeed = 0;
+    lastMoveSample = null;
+    stallFrames = 0;
+    stallWarned = false;
+    frameErrors = 0;
+    lastFrameT = 0;
+    routeProgress = 0;
+    stopIndex = 0;
+    pauseUntil = 0;
+
+    // Chase camera while moving; buttons / V / 1-8 switch angle.
+    releaseToFreeCamera();
+    notify(modeName() + " ACTIVE — " + stops.length + (stops.length === 1 ? " STOP" : " STOPS"));
+    updatePanel();
+}
+
+// Runs from the render loop, so it must never throw.
+function updatePushback() {
+    try {
+        updatePushbackInner();
+        frameErrors = 0;
+    } catch (e) {
+        console.error("[Y Pushback] frame error:", e);
+
+        if (++frameErrors > 30) {
+            stopPushback();
+            notify("STOPPED — SCRIPT ERROR (see console)");
+            setTimeout(hideUI, 5000);
+        }
+    }
+}
+
+function updatePushbackInner() {
+    if (!pushing || !stops.length || !routePoints.length) return;
+
+    releaseBrakes();
+
+    const a = aircraft();
+    if (!a || !a.rigidBody) { stopPushback(); return; }
+
+    const current = getPosition();
+    if (!current) return;
+
+    const nowT = performance.now();
+    const dt = clamp((nowT - (lastFrameT || nowT)) / 1000, 0.001, 0.1);
+    lastFrameT = nowT;
+
+    // Measured ground speed.
+    if (lastMoveSample) {
+        const mdt = (nowT - lastMoveSample.t) / 1000;
+        if (mdt > 0.001) {
+            measuredSpeed = lerp(measuredSpeed, distance(lastMoveSample.p, current) / mdt, 0.1);
+        }
+    }
+    lastMoveSample = { p: current, t: nowT };
+
+    const last = stops.length - 1;
+    const finalStop = stops[last];
+
+    const localCurrent = geoToLocal(startPosition, current);
+    const routeDistance = findNearestRouteDistance(localCurrent);
+    routeProgress = Math.max(routeProgress, routeDistance);
+
+    updateDistanceUI(Math.max(0, routeTotalLength - routeProgress));
+    updateHeadingUI();
+
+    // Waiting at an intermediate stop.
+    if (nowT < pauseUntil) {
+        driveVelocity(0, 0, dt);
+        currentSpeed = 0;
+        stallFrames = 0;
+        applyYaw(stops[Math.max(0, stopIndex - 1)].heading, dt);
+        return;
+    }
+
+    // Reached the stop we are heading to?
+    const remToStop = stopEnds[stopIndex] - routeProgress;
+
+    if (
+        remToStop <= STOP_DISTANCE ||
+        (stopIndex === last && distance(current, finalStop) <= STOP_DISTANCE)
+    ) {
+        if (stopIndex >= last) { finishPushback(); return; }
+
+        stopIndex++;
+        pauseUntil = nowT + WAYPOINT_PAUSE_S * 1000;
+        notify("STOP " + stopIndex + " REACHED — PAUSING");
+
+        driveVelocity(0, 0, dt);
+        currentSpeed = 0;
+        return;
+    }
+
+    // "Is it actually moving?" check.
+    if (currentSpeed > 0.8 && measuredSpeed < 0.1) stallFrames++;
+    else stallFrames = 0;
+
+    if (stallFrames > 150 && !stallWarned) {
+        stallWarned = true;
+        notify("AIRCRAFT NOT MOVING — release parking brake / check physics");
+        console.warn("[Y Pushback] Commanded", currentSpeed.toFixed(2), "m/s but measured", measuredSpeed.toFixed(2));
+    }
+
+    const tangent = getRouteTangent(routeProgress);
+
+    if (Math.abs(tangent.x) < 0.001 && Math.abs(tangent.y) < 0.001) {
+        finishPushback();
+        return;
+    }
+
+    // Smooth braking: speed follows v = sqrt(2 * a * distance) so the aircraft
+    // eases to a gentle stop at every stop, whatever the chosen speed.
+    let desiredSpeed = speedSetting;
+    const brakeSpeed = Math.sqrt(2 * BRAKE_DECEL * Math.max(0, remToStop - STOP_DISTANCE));
+
+    desiredSpeed = Math.min(desiredSpeed, Math.max(CREEP_SPEED, brakeSpeed));
+    desiredSpeed = clamp(desiredSpeed, Math.min(CREEP_SPEED, speedSetting), SPEED_MAX);
+
+    if (currentSpeed < desiredSpeed) {
+        currentSpeed = Math.min(desiredSpeed, currentSpeed + ACCELERATION * dt);
+    } else {
+        currentSpeed = Math.max(desiredSpeed, currentSpeed - DECELERATION * dt);
+    }
+
+    // Pure pursuit: aim at a point a few metres ahead ON the route.
+    let dirX = tangent.x;
+    let dirY = tangent.y;
+
+    const aim = getRoutePointAtDistance(
+        Math.min(routeTotalLength, routeProgress + Math.max(PURSUIT_LOOKAHEAD_M, currentSpeed * PURSUIT_SPEED_FACTOR))
+    );
+
+    if (aim) {
+        const ax = aim.x - localCurrent.x;
+        const ay = aim.y - localCurrent.y;
+        const al = Math.hypot(ax, ay);
+
+        if (al > 0.5) {
+            dirX = ax / al;
+            dirY = ay / al;
+        }
+    }
+
+    let vx = dirX * currentSpeed;
+    let vy = dirY * currentSpeed;
+
+    // Keep the motion generally in the travel direction (backward for pushback,
+    // forward for pull) relative to the nose.
+    const tr = travelDir(getAircraftHeading());
+    const rearX = tr.x;
+    const rearY = tr.y;
+
+    if (vx * rearX + vy * rearY < -0.2) {
+        vx = lerp(vx, rearX * currentSpeed, 0.65);
+        vy = lerp(vy, rearY * currentSpeed, 0.65);
+    }
+
+    if (!isFinite(vx) || !isFinite(vy)) return;
+
+    driveVelocity(vx, vy, dt);
+
+    // The nose points along (pull) or opposite to (push) the direction of
+    // travel; the last metres before a stop use the heading chosen for that stop.
+    let desiredHeading = stops[stopIndex].heading;
+
+    if (remToStop > 3) {
+        const ahead = getRouteTangent(
+            Math.min(routeTotalLength, routeProgress + YAW_LOOKAHEAD_M)
+        );
+        desiredHeading = noseHeadingForTravel(degrees(Math.atan2(ahead.x, ahead.y)));
+    }
+
+    applyYaw(desiredHeading, dt);
+}
+
+// ------------------------------------------------------------
+// YAW — turns the aircraft so its nose follows the route.
+// ------------------------------------------------------------
+
+// GeoFS 3.9 and 4.0 accept yaw commands differently, so several methods are
+// tried in turn. The first one that really turns the aircraft is kept.
+const YAW_METHODS = ["angular velocity", "angular velocity property", "torque", "direct heading"];
+let yawMethod = 0;
+let yawLocked = false;
+let yawNoResp = 0;
+let yawGoodFrames = 0;
+let yawCycles = 0;
+let yawDiagDone = false;
+let yawLastProbe = null;
+let measuredOmega = 0;
+
+function resetYawControl() {
+    yawSign = 1;
+    yawLastHeading = null;
+    yawLastProbe = null;
+    yawLastErr = 0;
+    yawBadFrames = 0;
+    yawIdleFrames = 0;
+    yawNoResp = 0;
+    yawGoodFrames = 0;
+    measuredOmega = 0;
+    yawWarned = false;
+    // yawMethod / yawLocked are kept on purpose: a method that worked keeps being used.
+}
+
+// Heading from every source we know (so one stale source can't fool the check).
+function headingProbes() {
+    const out = [getAircraftHeading()];
+    try {
+        const a = aircraft();
+        if (Array.isArray(a.htr) && typeof a.htr[0] === "number") {
+            let h = a.htr[0];
+            if (Math.abs(h) <= Math.PI * 2.5) h = h * 180 / Math.PI;
+            out.push(normalizeAngle(h));
+        }
+    } catch (e) {}
+    return out;
+}
+
+// Prints what this GeoFS build offers, so unknown builds can be diagnosed.
+function dumpYawDiag() {
+    if (yawDiagDone) return;
+    yawDiagDone = true;
+
+    try {
+        const a = aircraft();
+        const rb = a.rigidBody;
+        const names = [];
+        let p = Object.getPrototypeOf(rb);
+        while (p && p !== Object.prototype) {
+            Array.prototype.push.apply(names, Object.getOwnPropertyNames(p));
+            p = Object.getPrototypeOf(p);
+        }
+        console.log("[Y Pushback] DIAG GeoFS version:", geofs.version);
+        console.log("[Y Pushback] DIAG rigidBody properties:", Object.keys(rb).join(", "));
+        console.log("[Y Pushback] DIAG rigidBody methods:", names.join(", "));
+        console.log("[Y Pushback] DIAG aircraft properties:", Object.keys(a).join(", "));
+        console.log("[Y Pushback] DIAG htr:", JSON.stringify(a.htr),
+            "heading360:", geofs.animation && geofs.animation.values && geofs.animation.values.heading360);
+    } catch (e) {
+        console.warn("[Y Pushback] DIAG failed:", e);
+    }
+}
+window.ypbDiag = function () { yawDiagDone = false; dumpYawDiag(); };
+
+function advanceYawMethod(reason) {
+    dumpYawDiag();
+
+    yawMethod = (yawMethod + 1) % YAW_METHODS.length;
+    if (yawMethod === 0) yawCycles++;
+
+    yawNoResp = 0;
+    yawBadFrames = 0;
+    yawGoodFrames = 0;
+    yawLastProbe = null;
+
+    console.log("[Y Pushback] Yaw: " + reason + " -> trying method \"" + YAW_METHODS[yawMethod] + "\"");
+}
+
+// rate = rad/s as sent to the aircraft (already multiplied by yawSign).
+function setYawRate(rate, dt) {
+    if (!isFinite(rate)) rate = 0;
+
+    const a = aircraft();
+    if (!a || !a.rigidBody) return false;
+
+    const rb = a.rigidBody;
+
+    // Always make sure a "stop" really stops the spinning.
+    if (rate === 0) {
+        try { if (typeof rb.setAngularVelocity === "function") rb.setAngularVelocity([0, 0, 0]); } catch (e) {}
+    }
+
+    try {
+        switch (yawMethod) {
+            case 0:
+                if (typeof rb.setAngularVelocity !== "function") return false;
+                rb.setAngularVelocity([0, 0, rate]);
+                return true;
+
+            case 1: {
+                let ok = false;
+                ["angularVelocity", "v_angularVelocity", "rotationSpeed"].forEach(function (k) {
+                    const v = rb[k];
+                    if (Array.isArray(v) && v.length >= 3) {
+                        v[0] = 0; v[1] = 0; v[2] = rate;
+                        ok = true;
+                    } else if (v && typeof v === "object" && typeof v.z === "number") {
+                        v.x = 0; v.y = 0; v.z = rate;
+                        ok = true;
+                    }
+                });
+                return ok;
+            }
+
+            case 2: {
+                const fn = rb.applyTorque || rb.applyTorqueLocal;
+                if (typeof fn !== "function") return false;
+
+                const mass = Number(rb.mass) || 60000;
+                const inertia = mass * planeLength() * planeLength() / 12;
+
+                let torque = (rate - measuredOmega) * inertia * 2;
+                const lim = inertia * 0.4;
+                torque = clamp(torque, -lim, lim);
+                if (Math.abs(measuredOmega) > 0.5) torque = 0;   // safety: never spin up
+
+                fn.call(rb, [0, 0, torque]);
+                return true;
+            }
+
+            case 3: {
+                // Last resort: write the heading ourselves.
+                if (!Array.isArray(a.htr) || typeof a.htr[0] !== "number" || !dt) return false;
+
+                const cur = getAircraftHeading();
+                const hv = a.htr[0];
+                const isRad = Math.abs(normalizeAngle(degrees(hv)) - cur) < Math.abs(normalizeAngle(hv) - cur);
+                const next = normalizeAngle(cur + degrees(rate * yawSign) * dt);
+
+                a.htr[0] = isRad ? radians(next) : next;
+                return true;
+            }
+        }
+    } catch (e) {
+        console.error("[Y Pushback] yaw method \"" + YAW_METHODS[yawMethod] + "\" failed:", e);
+    }
+
+    return false;
+}
+
+function applyYaw(desiredHeading, dt) {
+    const h = getAircraftHeading();
+    dt = dt > 0 ? dt : 0.016;
+
+    // Blend the wanted heading so the nose never snaps to a new direction.
+    if (smoothTarget === null) smoothTarget = h;
+    smoothTarget = normalizeAngle(
+        smoothTarget + angleDifference(desiredHeading, smoothTarget) * (1 - Math.exp(-dt / YAW_TARGET_SMOOTH_S))
+    );
+
+    const err = angleDifference(smoothTarget, h);
+
+    // ---- Did the last command make the aircraft turn? ----
+    const probes = headingProbes();
+
+    if (yawLastProbe && Math.abs(yawLastErr) > 4) {
+        let dh = 0;
+
+        for (let i = 0; i < probes.length && i < yawLastProbe.length; i++) {
+            const d = angleDifference(probes[i], yawLastProbe[i]);
+            if (Math.abs(d) > 0.01) { dh = d; break; }
+        }
+
+        if (dh !== 0) {
+            yawNoResp = 0;
+            measuredOmega = yawSign * radians(dh) / dt;
+
+            if (Math.sign(dh) !== Math.sign(yawLastErr)) {
+                yawBadFrames++;
+                yawGoodFrames = 0;
+            } else {
+                yawBadFrames = Math.max(0, yawBadFrames - 1);
+                if (++yawGoodFrames >= 30 && !yawLocked) {
+                    yawLocked = true;
+                    console.log("[Y Pushback] Yaw method \"" + YAW_METHODS[yawMethod] + "\" works — keeping it.");
+                }
+            }
+
+            if (yawBadFrames >= 12) {
+                yawSign = -yawSign;
+                yawBadFrames = 0;
+                console.log("[Y Pushback] Yaw direction flipped.");
+            }
+        } else if (!yawLocked && ++yawNoResp > 45) {
+            advanceYawMethod("no response");
+
+            if (yawCycles >= 2 && !yawWarned) {
+                yawWarned = true;
+                notify("ACTIVE — AIRCRAFT WON'T ROTATE ON THIS GeoFS BUILD (see console)");
+                console.warn("[Y Pushback] No yaw method turned the aircraft. Run ypbDiag() in the console and send the output.");
+            }
+        }
+    }
+
+    yawLastHeading = h;
+    yawLastProbe = probes;
+    yawLastErr = err;
+
+    let rate = clamp(radians(err) * YAW_GAIN, -MAX_YAW_RATE, MAX_YAW_RATE);
+
+    // The turning rate itself changes gradually (no sudden twitch of the nose).
+    const maxStep = MAX_YAW_ACCEL * dt;
+    rate = clamp(rate, smoothYawRate - maxStep, smoothYawRate + maxStep);
+    smoothYawRate = rate;
+
+    // Method unavailable on this build: skip straight to the next one.
+    if (!setYawRate(rate * yawSign, dt) && !yawLocked) {
+        advanceYawMethod("method not available");
+    }
+}
+
+// Sends a velocity to the aircraft, blended over VELOCITY_SMOOTH_S so speed and
+// direction never jump from one frame to the next.
+function driveVelocity(tx, ty, dt) {
+    const k = 1 - Math.exp(-dt / VELOCITY_SMOOTH_S);
+    smoothVel.x += (tx - smoothVel.x) * k;
+    smoothVel.y += (ty - smoothVel.y) * k;
+    setVelocity(smoothVel.x, smoothVel.y);
+}
+
+function setVelocity(x, y) {
+    const a = aircraft();
+    if (!a || !a.rigidBody) return;
+
+    try {
+        a.rigidBody.setLinearVelocity([x, y, 0]);
+    } catch (e) {
+        console.error("[Y Pushback] setLinearVelocity failed:", e);
+    }
+}
+
+// ============================================================
+// FINISH / STOP / CANCEL
+// ============================================================
+
+// While moving: switch from the planner to the chase camera.
+function releaseToFreeCamera() {
+    if (plannerCanvas) {
+        plannerCanvas.style.pointerEvents = "none";
+        plannerCanvas.style.cursor = "default";
+    }
+    document.body.style.cursor = "default";
+
+    setCameraMode("chase");
+}
+
+function leaveTopView() {
+    overlayActive = false;
+    hidePlanner();
+    restoreCamera();
+    document.body.style.cursor = "default";
+    hideUI();
+    updatePanel();
+}
+
+function finishPushback() {
+    setVelocity(0, 0);
+    setYawRate(0);
+    if (AUTO_PARKING_BRAKE) setParkingBrake();
+
+    pushing = false;
+    currentSpeed = 0;
+    lastFrameT = 0;
+
+    notify(modeName() + " COMPLETE" + (AUTO_PARKING_BRAKE ? " — PARKING BRAKE SET" : ""));
+    updateDistanceUI(0);
+
+    finishTimer = setTimeout(function () {
+        finishTimer = null;
+        leaveTopView();
+    }, 1000);
+
+    stops = [];
+    preview = null;
+    stopEnds = [];
+    routePoints = [];
+
+    updatePanel();
+}
+
+function stopPushback() {
+    setVelocity(0, 0);
+    setYawRate(0);
+    if (AUTO_PARKING_BRAKE) setParkingBrake();
+
+    pushing = false;
+    currentSpeed = 0;
+    lastFrameT = 0;
+
+    stops = [];
+    preview = null;
+    stopEnds = [];
+    routePoints = [];
+
+    leaveTopView();
+    console.log("[Y Pushback] Stopped.");
+}
+
+function cancelSelection() {
+    selecting = false;
+
+    stops = [];
+    preview = null;
+    stopEnds = [];
+    routePoints = [];
+    routeLengths = [];
+    routeTotalLength = 0;
+
+    if (plannerCanvas) plannerCanvas.style.cursor = "crosshair";
+
+    leaveTopView();
+    console.log("[Y Pushback] Selection cancelled.");
+}
+
+// ============================================================
+// KEYS
+// ============================================================
+
+function typingInField() {
+    const el = document.activeElement;
+    const tag = el && el.tagName;
+
+    return (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        (el && el.isContentEditable)
+    );
+}
+
+// Y = push back, T = pull forward (pressing again cancels / stops).
+document.addEventListener(
+    "keydown",
+    function (event) {
+        const k = event.key.toLowerCase();
+        if (k !== "y" && k !== "t") return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (typingInField()) return;
+
+        event.preventDefault();
+        startPushbackMode(k === "t");
+    },
+    true
+);
+
+// Speed: + / = faster, - / _ slower (while planning or moving).
+document.addEventListener(
+    "keydown",
+    function (event) {
+        if (!(selecting || pushing) || typingInField()) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+        if (event.key === "+" || event.key === "=") {
+            event.preventDefault();
+            event.stopPropagation();
+            changeSpeed(SPEED_STEP);
+        } else if (event.key === "-" || event.key === "_") {
+            event.preventDefault();
+            event.stopPropagation();
+            changeSpeed(-SPEED_STEP);
+        }
+    },
+    true
+);
+
+// Zoom the top view: ] = closer, [ = further away (planning, or top camera while moving).
+document.addEventListener(
+    "keydown",
+    function (event) {
+        if (!(selecting || (pushing && overheadActive)) || typingInField()) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+        if (event.key === "]") {
+            event.preventDefault();
+            event.stopPropagation();
+            zoomView(1 / ZOOM_STEP);
+        } else if (event.key === "[") {
+            event.preventDefault();
+            event.stopPropagation();
+            zoomView(ZOOM_STEP);
+        }
+    },
+    true
+);
+
+// Camera: V = next angle, Shift+V = previous, 1-8 = pick an angle.
+document.addEventListener(
+    "keydown",
+    function (event) {
+        if (!pushing || typingInField()) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+        const k = event.key.toLowerCase();
+
+        if (k === TOGGLE_VIEW_KEY) {
+            event.preventDefault();
+            event.stopPropagation();
+            cycleCamera(event.shiftKey ? -1 : 1);
+            return;
+        }
+
+        for (let i = 0; i < CAMERA_ORDER.length; i++) {
+            if (CAMERA_MODES[CAMERA_ORDER[i]].key === event.key) {
+                event.preventDefault();
+                event.stopPropagation();
+                setCameraMode(CAMERA_ORDER[i]);
+                return;
+            }
+        }
+    },
+    true
+);
+
+// Planning keys: R = reset heading, Z / Backspace = undo, Enter = ready, S = save plan.
+document.addEventListener(
+    "keydown",
+    function (event) {
+        if (!selecting || typingInField()) return;
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+        const k = event.key.toLowerCase();
+
+        if (k === "r") {
+            event.preventDefault();
+            event.stopPropagation();
+            rotateFinalHeading(angleDifference(startHeading, finalHeading));
+        } else if (k === "z" || event.key === "Backspace") {
+            event.preventDefault();
+            event.stopPropagation();
+            undoStop();
+        } else if (k === "l") {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleStraight();
+        } else if (k === "s") {
+            event.preventDefault();
+            event.stopPropagation();
+            savePlan();
+        } else if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopPropagation();
+            confirmReady();
+        }
+    },
+    true
+);
+
+document.addEventListener(
+    "keydown",
+    function (event) {
+        if (event.key !== "Escape") return;
+
+        if (savedOpen()) closeSaved();
+        else if (selecting) cancelSelection();
+        else if (pushing) stopPushback();
+    },
+    true
+);
+
+// ============================================================
+// START
+// ============================================================
+
+waitForGeoFS();
+
+})();
