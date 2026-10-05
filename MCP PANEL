@@ -1,0 +1,708 @@
+// ==UserScript==
+// @name         MCP PANEL
+// @namespace    http://tampermonkey.net/
+// @version      1
+// @description  Boeing MCP panel with dynamic color theme matching for real aircraft cockpits (Airbus, Boeing, Antonov/Soviet, Military, GA, CRJ, Embraer)
+// @match        https://*.geo-fs.com/geofs.php*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // CUSTOM DIAL TEXTURE URL
+    const DIAL_TEXTURE_URL = 'https://6a9f4f89b9f3f1e956cba77c.imgix.net/sandbox/ggggggggg%20-%20Copdy.png';
+
+    if (document.getElementById('geofs-mcp-container')) {
+        document.getElementById('geofs-mcp-container').remove();
+    }
+    if (document.getElementById('geofs-mcp-tab')) {
+        document.getElementById('geofs-mcp-tab').remove();
+    }
+
+    const style = document.createElement('style');
+    const dialBgCSS = DIAL_TEXTURE_URL ? `url('${DIAL_TEXTURE_URL}')` : 'none';
+
+    style.innerHTML = `
+        #geofs-mcp-container {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 999999;
+            background-color: var(--mcp-bg-main, #141414);
+            background-image:
+                radial-gradient(ellipse at center, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.4) 100%),
+                repeating-linear-gradient(45deg, rgba(0,0,0,0.03) 0px, rgba(0,0,0,0.03) 2px, transparent 2px, transparent 4px);
+            border: 3px solid var(--mcp-border, #0a0a0a); border-radius: 8px; padding: 12px 16px;
+            box-shadow: 0 12px 35px rgba(0,0,0,0.85); font-family: Arial, sans-serif;
+            color: #ffffff; display: none; width: 850px; box-sizing: border-box; user-select: none;
+            transition: background-color 0.4s ease, border-color 0.4s ease;
+            cursor: move;
+        }
+        .mcp-section { display: inline-block; vertical-align: top; margin-right: 14px; text-align: center; cursor: default; }
+        .mcp-label { font-size: 10px; font-weight: bold; letter-spacing: 1px; color: #f2e2d0; margin-bottom: 5px; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+
+        .mcp-screen-box {
+            background: #080808; border: 2px inset #3a3a3a;
+            border-radius: 3px; width: 85px; height: 32px; box-sizing: border-box; margin: 0 auto;
+            box-shadow: inset 0 3px 6px rgba(0,0,0,0.95); position: relative; overflow: hidden;
+            cursor: ns-resize; touch-action: none;
+        }
+        .mcp-screen-box::after {
+            content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 50%;
+            background: linear-gradient(to bottom, rgba(255,255,255,0.08), rgba(255,255,255,0));
+            pointer-events: none; z-index: 5;
+        }
+        .drum-strip {
+            position: absolute; width: 100%; top: 0; left: 0;
+            transition: transform 0.1s cubic-bezier(0.1, 0.8, 0.2, 1);
+        }
+        .drum-digit {
+            height: 32px; line-height: 30px; text-align: center;
+            color: #ff9933; font-family: Arial, sans-serif; font-size: 18px; font-weight: bold;
+            text-shadow: 0 0 5px rgba(255,153,51,0.4);
+        }
+
+        .mcp-btn {
+            background: linear-gradient(to bottom, #262626, #161616); border: 2px solid #484848; color: #fff; font-size: 10px; font-weight: bold;
+            padding: 5px 4px; margin-top: 5px; cursor: pointer; border-radius: 3px; width: 48px;
+            text-align: center; display: inline-block; box-shadow: inset 0 1px 2px rgba(255,255,255,0.15), 0 2px 4px rgba(0,0,0,0.5);
+            transition: background 0.15s ease, border-color 0.15s ease;
+        }
+        .mcp-btn:hover { border-color: #666; background: linear-gradient(to bottom, #303030, #1c1c1c); }
+        .mcp-btn:active { background: #111; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8); }
+
+        .mcp-btn.active {
+            background: linear-gradient(to bottom, #1e5229, #113318) !important;
+            border-color: #388e3c !important;
+            color: #ffffff !important;
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7) !important;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+
+        .mcp-btn.set-btn {
+            width: 85px; background: linear-gradient(to bottom, #2a2a2a, #181818); border-color: #444444; color: #ffb86c; font-size: 11px;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+        }
+        .mcp-btn.set-btn.active {
+            background: linear-gradient(to bottom, #1e5229, #113318) !important; border-color: #388e3c !important; color: #ffffff !important;
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7); text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+        .indicator { width: 5px; height: 11px; background: #333333; border-radius: 2px; box-shadow: inset 0 1px 2px rgba(0,0,0,0.6); }
+        .mcp-btn.set-btn.active .indicator { background: #00e676; box-shadow: 0 0 6px #00e676, inset 0 1px 2px rgba(0,0,0,0.3); }
+
+        .mcp-dial-wrapper {
+            width: 48px; height: 48px; margin: 6px auto; position: relative; cursor: pointer; touch-action: none;
+        }
+        .mcp-dial {
+            width: 100%; height: 100%;
+            background-image: ${dialBgCSS};
+            background-size: contain; background-position: center center; background-repeat: no-repeat;
+            border: none; box-shadow: none;
+            border-radius: 50%; position: relative; pointer-events: none;
+            transition: transform 0.08s ease-out; box-sizing: border-box;
+        }
+
+        .mcp-toggle-tab {
+            position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); z-index: 999998;
+            background: var(--mcp-border, #0a0a0a); color: #ff9933; border: 2px solid var(--mcp-bg-main, #141414); border-bottom: none;
+            padding: 6px 20px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: monospace;
+            font-weight: bold; font-size: 12px; box-shadow: 0 -4px 10px rgba(0,0,0,0.5);
+            transition: background 0.4s ease, border-color 0.4s ease;
+        }
+    `;
+    document.head.appendChild(style);
+
+    const mcpHTML = `
+        <div id="geofs-mcp-container">
+            <div class="mcp-section" style="width: 65px;">
+                <div class="mcp-label">F/D / A/T</div>
+                <div class="mcp-btn" id="btn-at" style="width:100%; margin-bottom:4px;">A/T ARM</div>
+                <div class="mcp-btn" id="btn-thr" style="width:100%; margin-bottom:4px;">THR</div>
+                <div class="mcp-btn" id="btn-spd" style="width:100%;">SPD</div>
+            </div>
+
+            <div class="mcp-section">
+                <div class="mcp-label">IAS / MACH</div>
+                <div class="mcp-screen-box" id="box-ias">
+                    <div class="drum-strip" id="drum-ias">
+                        <div class="drum-digit">249</div>
+                        <div class="drum-digit">250</div>
+                        <div class="drum-digit">251</div>
+                    </div>
+                </div>
+                <div class="mcp-dial-wrapper" id="wrap-ias"><div class="mcp-dial" id="dial-ias"></div></div>
+                <div class="mcp-btn set-btn" id="set-ias"><div class="indicator"></div>SET</div>
+                <div style="margin-top: 4px;">
+                    <div class="mcp-btn" id="btn-lnav" style="width: 39px;">L NAV</div>
+                    <div class="mcp-btn" id="btn-vnav" style="width: 39px;">V NAV</div>
+                </div>
+            </div>
+
+            <div class="mcp-section">
+                <div class="mcp-label">HDG SELECT</div>
+                <div class="mcp-screen-box" id="box-hdg">
+                    <div class="drum-strip" id="drum-hdg">
+                        <div class="drum-digit">269</div>
+                        <div class="drum-digit">270</div>
+                        <div class="drum-digit">271</div>
+                    </div>
+                </div>
+                <div class="mcp-dial-wrapper" id="wrap-hdg"><div class="mcp-dial" id="dial-hdg"></div></div>
+                <div class="mcp-btn set-btn" id="set-hdg"><div class="indicator"></div>SET</div>
+                <div style="margin-top: 4px;">
+                    <div class="mcp-btn" id="btn-hdghold" style="width: 85px;">HDG HOLD</div>
+                </div>
+            </div>
+
+            <div class="mcp-section">
+                <div class="mcp-label">VERT SPD</div>
+                <div class="mcp-screen-box" id="box-vs">
+                    <div class="drum-strip" id="drum-vs">
+                        <div class="drum-digit">-100</div>
+                        <div class="drum-digit">0</div>
+                        <div class="drum-digit">100</div>
+                    </div>
+                </div>
+                <div class="mcp-dial-wrapper" id="wrap-vs"><div class="mcp-dial" id="dial-vs"></div></div>
+                <div class="mcp-btn set-btn" id="set-vs"><div class="indicator"></div>SET</div>
+                <div style="margin-top: 4px;">
+                    <div class="mcp-btn" id="btn-vshold" style="width: 85px;">V/S HOLD</div>
+                </div>
+            </div>
+
+            <div class="mcp-section">
+                <div class="mcp-label">ALTITUDE</div>
+                <div class="mcp-screen-box" id="box-alt">
+                    <div class="drum-strip" id="drum-alt">
+                        <div class="drum-digit">4900</div>
+                        <div class="drum-digit">5000</div>
+                        <div class="drum-digit">5100</div>
+                    </div>
+                </div>
+                <div class="mcp-dial-wrapper" id="wrap-alt"><div class="mcp-dial" id="dial-alt"></div></div>
+                <div class="mcp-btn set-btn" id="set-alt"><div class="indicator"></div>SET</div>
+                <div style="margin-top: 4px;">
+                    <div class="mcp-btn" id="btn-althold" style="width: 85px;">ALT HOLD</div>
+                </div>
+            </div>
+
+            <div class="mcp-section" style="float: right; margin-right: 0;">
+                <div class="mcp-label">A/P ENGAGE</div>
+                <div style="margin-bottom: 5px;">
+                    <div class="mcp-btn" id="btn-cmd" style="background: linear-gradient(to bottom, #2e7d32, #1b5e20); border-color: #4caf50; color: #fff; width: 100%; padding: 8px;">ENGAGE ALL</div>
+                </div>
+                <div>
+                    <div class="mcp-btn" style="width: 39px;">APP</div>
+                    <div class="mcp-btn" style="width: 39px;">LOC</div>
+                </div>
+            </div>
+        </div>
+        <div id="geofs-mcp-tab" class="mcp-toggle-tab">🎛️ MCP PANEL</div>
+    `;
+
+    document.body.insertAdjacentHTML('beforeend', mcpHTML);
+
+    const container = document.getElementById('geofs-mcp-container');
+    const tab = document.getElementById('geofs-mcp-tab');
+
+    tab.addEventListener('click', () => {
+        container.style.display = container.style.display === 'block' ? 'none' : 'block';
+    });
+
+    // --- DRAGGABLE INTERFACE IMPLEMENTATION ---
+    let isDraggingPanel = false;
+    let dragStartX = 0, dragStartY = 0;
+
+    container.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.mcp-btn, .mcp-screen-box, .mcp-dial-wrapper')) return;
+        isDraggingPanel = true;
+        dragStartX = e.clientX - container.offsetLeft;
+        dragStartY = e.clientY - container.offsetTop;
+        e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isDraggingPanel) return;
+        container.style.transform = 'none';
+        container.style.left = (e.clientX - dragStartX) + 'px';
+        container.style.top = (e.clientY - dragStartY) + 'px';
+        container.style.bottom = 'auto';
+    });
+
+    window.addEventListener('mouseup', () => {
+        isDraggingPanel = false;
+    });
+
+    // --- DYNAMIC AIRCRAFT THEME COLOR LOGIC ---
+    let currentAircraftId = null;
+
+    // Colours approximate the real glareshield / panel paint of each cockpit family
+    const THEMES = {
+        AIRBUS:         { bg: '#4a545c', border: '#232a30' }, // Airbus blue-grey
+        BOEING_NG:      { bg: '#7c8186', border: '#3d4145' }, // 737NG light grey
+        BOEING_WIDE:    { bg: '#6b7075', border: '#33373b' }, // 777 / 787 / 747-8 mid grey
+        BOEING_BROWN:   { bg: '#75604b', border: '#2b2218' }, // 747-400 / 757 / 767 grey-brown
+        BOEING_CLASSIC: { bg: '#66705f', border: '#2a2f26' }, // 707 / 720 / 727 / early 737 grey-green
+        MD_DC:          { bg: '#6d6a62', border: '#2e2c28' }, // DC-10 / MD-11 warm grey
+        CONCORDE:       { bg: '#1c1c1d', border: '#09090a' }, // all-black flight deck
+        SOVIET_TEAL:    { bg: '#6f9a94', border: '#34524e' }, // Antonov / Ilyushin / Tupolev pale teal-green
+        SOVIET_FIGHTER: { bg: '#4f7f86', border: '#243d41' }, // Su / MiG turquoise-blue
+        MIL_DARK:       { bg: '#363b42', border: '#1a1d21' }, // F-15 / F-16 / A-10 / Hawk dark grey
+        MIL_BLACK:      { bg: '#202225', border: '#0b0c0d' }, // F-14 / SR-71 / F-22 / F-35 / Rafale
+        HELI:           { bg: '#3f4449', border: '#1c1f22' }, // helicopters / tiltrotors
+        GA_TAN:         { bg: '#8a7b66', border: '#3a3226' }, // Cessna / Piper tan panels
+        GA_GLASS:       { bg: '#2b2e33', border: '#0f1114' }, // Cirrus / Diamond / Beech glass cockpit
+        REGIONAL_GREY:  { bg: '#5d666e', border: '#2b3036' }, // ATR / CRJ / Dash 8 / Q400
+        EMBRAER:        { bg: '#3e4850', border: '#1b2126' }, // E-Jets charcoal blue-grey
+        DEFAULT:        { bg: '#141414', border: '#0a0a0a' }
+    };
+
+    // First match wins, so specific models go before general ones
+    const THEME_RULES = [
+        [/concorde/, 'CONCORDE'],
+        [/\ban[- ]?(12[0-9]|22[0-9]|7[0-9]|2|3|26|32|148)\b|antonov|ilyushin|\bil[- ]?\d|tupolev|\btu[- ]?\d|\byak[- ]?\d/, 'SOVIET_TEAL'],
+        [/\bsu[- ]?\d|sukhoi|\bmig[- ]?\d/, 'SOVIET_FIGHTER'],
+        [/a220|a318|a319|a320|a321|a330|a340|a350|a380|a400|airbus|\bbd-500/, 'AIRBUS'],
+        [/747-?8|777|787|dreamliner/, 'BOEING_WIDE'],
+        [/737-?(100|200)|727|720|707|\bdc-?[89]\b|\bmd-?8\d/, 'BOEING_CLASSIC'],
+        [/747|757|767/, 'BOEING_BROWN'],
+        [/737|boeing|\b7[0-9]7\b/, 'BOEING_NG'],
+        [/\bdc-?10|\bmd-?11|\bmd-?1[0-9]|\bmd-?9/, 'MD_DC'],
+        [/\bf-?14\b|\bf-?22\b|\bf-?35\b|\bsr-?71\b|\bb-?2\b|rafale|\bf-?117\b|\bf-?4\b|harrier|tornado|gripen|typhoon|eurofighter/, 'MIL_BLACK'],
+        [/\bf-?15\b|\bf-?16\b|f\/a-?18|\bf-?18\b|\ba-?10\b|thunderbolt|mirage|\bhawk\b|\bt-?38\b|\bt-?45\b|\bc-?130\b|\bc-?17\b|\bkc-?\d+|\bb-?52\b|\bb-?1\b/, 'MIL_DARK'],
+        [/helicopter|\baw\d|agusta|\bbell\b|\buh-?\d|\bch-?\d|apache|black ?hawk|robinson|\br22\b|\br44\b|eurocopter|\bec-?\d|osprey|\bv-?22\b|\bmi-?\d/, 'HELI'],
+        [/embraer|\berj|\be1[79]\d|\be-?jet|\bemb-?1[0-9]{2}|phenom|legacy|praetor/, 'EMBRAER'],
+        [/\batr|\bcrj|dash ?8|q400|dhc|saab|fokker|bae ?146|avro|jetstream/, 'REGIONAL_GREY'],
+        [/cirrus|diamond|\bda-?\d|beech|bonanza|king ?air|\btbm|pilatus|\bpc-?12|citation|learjet|gulfstream|challenger/, 'GA_GLASS'],
+        [/cessna|piper|\bc-?1[0-9]{2}\b|\bpa-?\d|cherokee|warrior|archer|seneca|mooney|aeronca|stearman|champ|taylorcraft|\brobin/, 'GA_TAN']
+    ];
+
+    function updateAircraftTheme() {
+        try {
+            if (typeof geofs === 'undefined' || !geofs.aircraft || !geofs.aircraft.instance) return;
+
+            const inst = geofs.aircraft.instance;
+            const acId = inst.id;
+            const acName = (
+                (inst.aircraftRecord && inst.aircraftRecord.name) || inst.name || ''
+            ).toLowerCase();
+
+            if (acId === currentAircraftId) return;
+            currentAircraftId = acId;
+
+            let selectedTheme = THEMES.DEFAULT;
+            for (const [regex, key] of THEME_RULES) {
+                if (regex.test(acName)) { selectedTheme = THEMES[key]; break; }
+            }
+
+            container.style.setProperty('--mcp-bg-main', selectedTheme.bg);
+            container.style.setProperty('--mcp-border', selectedTheme.border);
+            tab.style.setProperty('--mcp-bg-main', selectedTheme.bg);
+            tab.style.setProperty('--mcp-border', selectedTheme.border);
+        } catch (e) {
+            console.warn('[GeoFS MCP] Theme update error:', e);
+        }
+    }
+
+    const values = { ias: 250, hdg: 270, vs: 0, alt: 5000 };
+    const cumulativeRot = { ias: 250 * 1.5, hdg: 270, vs: 0, alt: 5000 * 1.5 };
+    const lastInteractionTime = { ias: 0, hdg: 0, vs: 0, alt: 0 };
+
+    const domSelectors = {
+        ias: ['#autopilotSpeed', 'input[data-autopilot="speed"]', '.autopilot-speed-input', '.geofs-ap-speed', '#geofs-ap-input-speed'],
+        hdg: [
+            '#autopilotTargetHeading', '#autopilotHeading', '.geofs-ap-targetHeading', '.geofs-ap-target-heading',
+            'input[data-autopilot="targetHeading"]', 'input[data-autopilot="heading"]', 'input[data-ap="heading"]',
+            '.autopilot-heading-input', '.autopilot-target-heading-input', '.geofs-ap-heading', 'input.geofs-autopilot-heading',
+            '#geofs-ap-input-heading', '#geofs-ap-input-targetHeading'
+        ],
+        alt: ['#autopilotAltitude', 'input[data-autopilot="altitude"]', '.autopilot-altitude-input', '.geofs-ap-altitude', '#geofs-ap-input-altitude'],
+        vs:  ['#autopilotVerticalSpeed', '#autopilotVS', 'input[data-autopilot="verticalSpeed"]', '.geofs-ap-vs', '#geofs-ap-input-vs']
+    };
+
+    function getPlaneHeading() {
+        try {
+            if (typeof geofs !== 'undefined') {
+                if (geofs.animation && geofs.animation.values) {
+                    if (typeof geofs.animation.values.heading360 === 'number') {
+                        return geofs.animation.values.heading360;
+                    }
+                    if (typeof geofs.animation.values.heading === 'number') {
+                        return (geofs.animation.values.heading % 360 + 360) % 360;
+                    }
+                }
+                if (geofs.aircraft && geofs.aircraft.instance && typeof geofs.aircraft.instance.htg === 'number') {
+                    return (geofs.aircraft.instance.htg % 360 + 360) % 360;
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function isAircraftStationary() {
+        try {
+            if (typeof geofs !== 'undefined' && geofs.animation && geofs.animation.values) {
+                const kias = geofs.animation.values.kias || 0;
+                const groundSpeed = geofs.animation.values.groundSpeed || 0;
+                return (kias < 2 && groundSpeed < 2);
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    function updateDisplay(param, deltaAmount = 0) {
+        let val = values[param];
+        const step = (param === 'alt' || param === 'vs') ? 100 : 1;
+        const strip = document.getElementById(`drum-${param}`);
+        const dial = document.getElementById(`dial-${param}`);
+
+        if (strip) {
+            strip.innerHTML = `
+                <div class="drum-digit">${val - step}</div>
+                <div class="drum-digit">${val}</div>
+                <div class="drum-digit">${val + step}</div>
+            `;
+            strip.style.transform = `translateY(-32px)`;
+        }
+
+        if (dial) {
+            if (param === 'hdg') {
+                if (deltaAmount > 180) deltaAmount -= 360;
+                if (deltaAmount < -180) deltaAmount += 360;
+                cumulativeRot.hdg += deltaAmount;
+                dial.style.transform = `rotate(${cumulativeRot.hdg}deg)`;
+            } else {
+                cumulativeRot[param] += deltaAmount * 1.5;
+                dial.style.transform = `rotate(${cumulativeRot[param]}deg)`;
+            }
+        }
+    }
+
+    function changeValue(param, amount) {
+        let oldVal = values[param];
+        let val = oldVal + amount;
+
+        if (param === 'ias') {
+            val = Math.max(val, 0);
+        } else if (param === 'hdg') {
+            val = (val % 360 + 360) % 360;
+        } else if (param === 'vs') {
+            val = Math.min(Math.max(val, -6000), 6000);
+        } else if (param === 'alt') {
+            val = Math.min(Math.max(val, 0), 60000);
+        }
+
+        let diff = val - oldVal;
+        if (param === 'hdg') {
+            if (diff > 180) diff -= 360;
+            if (diff < -180) diff += 360;
+        }
+
+        values[param] = val;
+        lastInteractionTime[param] = Date.now();
+        updateDisplay(param, diff);
+        pushValuesToGeoFS();
+    }
+
+    function makeInteractive(targetElementId, param) {
+        const el = document.getElementById(targetElementId);
+        if (!el) return;
+        const baseStep = (param === 'alt' || param === 'vs') ? 100 : 1;
+
+        let holdInterval = null;
+        let isDragging = false;
+        let startY = 0;
+        let accumulatedDelta = 0;
+
+        function startHolding(direction) {
+            if (holdInterval) return;
+            changeValue(param, direction * baseStep);
+            holdInterval = setInterval(() => {
+                changeValue(param, direction * baseStep);
+            }, 120);
+        }
+
+        function stopHolding() {
+            if (holdInterval) {
+                clearInterval(holdInterval);
+                holdInterval = null;
+            }
+            isDragging = false;
+        }
+
+        el.addEventListener('mousedown', (e) => {
+            const rect = el.getBoundingClientRect();
+            const clickX = e.clientX - rect.left;
+            const midX = rect.width / 2;
+
+            if (targetElementId.startsWith('wrap-')) {
+                const direction = clickX > midX ? 1 : -1;
+                startHolding(direction);
+            } else {
+                isDragging = true;
+                startY = e.clientY;
+                accumulatedDelta = 0;
+            }
+            e.stopPropagation();
+            e.preventDefault();
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const deltaY = startY - e.clientY;
+            accumulatedDelta += deltaY;
+
+            if (Math.abs(accumulatedDelta) >= 8) {
+                const rawSteps = Math.trunc(accumulatedDelta / 8);
+                const multiplier = Math.min(Math.max(Math.abs(rawSteps), 1), 5);
+                changeValue(param, rawSteps > 0 ? (baseStep * multiplier) : -(baseStep * multiplier));
+
+                accumulatedDelta %= 8;
+                startY = e.clientY;
+            }
+        });
+
+        window.addEventListener('mouseup', stopHolding);
+
+        el.addEventListener('wheel', (e) => {
+            changeValue(param, e.deltaY < 0 ? baseStep : -baseStep);
+            e.preventDefault();
+        }, { passive: false });
+    }
+
+    ['ias', 'hdg', 'vs', 'alt'].forEach(param => {
+        makeInteractive(`wrap-${param}`, param);
+        makeInteractive(`box-${param}`, param);
+    });
+
+    function pushValuesToGeoFS() {
+        try {
+            Object.keys(domSelectors).forEach(key => {
+                let val = values[key];
+                domSelectors[key].forEach(sel => {
+                    document.querySelectorAll(sel).forEach(el => {
+                        if ((el.tagName === 'INPUT' || typeof el.value !== 'undefined') && el.value != val) {
+                            el.value = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        } else if (el.tagName !== 'INPUT' && el.innerText !== undefined && el.innerText != val) {
+                            el.innerText = val;
+                        }
+                    });
+                });
+            });
+
+            document.querySelectorAll('input').forEach(input => {
+                const parentText = (input.parentElement ? input.parentElement.innerText : '') + (input.className || '') + (input.id || '');
+                if (parentText.toLowerCase().includes('hdg') || parentText.toLowerCase().includes('heading')) {
+                    if (input.value != values.hdg) {
+                        input.value = values.hdg;
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }
+            });
+
+            if (typeof geofs !== 'undefined' && geofs.autopilot) {
+                geofs.autopilot.speed = values.ias;
+                geofs.autopilot.heading = values.hdg;
+                geofs.autopilot.targetHeading = values.hdg;
+                geofs.autopilot.altitude = values.alt;
+                geofs.autopilot.verticalSpeed = values.vs;
+
+                if (geofs.autopilot.values) {
+                    geofs.autopilot.values.speed = values.ias;
+                    geofs.autopilot.values.heading = values.hdg;
+                    geofs.autopilot.values.targetHeading = values.hdg;
+                    geofs.autopilot.values.altitude = values.alt;
+                    geofs.autopilot.values.verticalSpeed = values.vs;
+                    geofs.autopilot.values.climbRate = values.vs;
+                }
+
+                if (typeof geofs.autopilot.setTargetHeading === 'function') {
+                    geofs.autopilot.setTargetHeading(values.hdg);
+                }
+                if (typeof geofs.autopilot.setHeading === 'function') {
+                    geofs.autopilot.setHeading(values.hdg);
+                }
+                if (typeof geofs.autopilot.turnTo === 'function') {
+                    geofs.autopilot.turnTo(values.hdg);
+                }
+            }
+        } catch (err) {
+            console.warn('[GeoFS MCP] Sync notice:', err);
+        }
+    }
+
+    function toggleGeoFSMode(modeName, forceState) {
+        try {
+            if (typeof geofs !== 'undefined' && geofs.autopilot) {
+                if (!geofs.autopilot.on && forceState !== false) {
+                    if (typeof geofs.autopilot.turnOn === 'function') geofs.autopilot.turnOn();
+                    else geofs.autopilot.on = true;
+                }
+
+                if (typeof geofs.autopilot.setMode === 'function') {
+                    geofs.autopilot.setMode(modeName);
+                } else if (geofs.autopilot.modes) {
+                    const currentState = !!geofs.autopilot.modes[modeName];
+                    const newState = forceState !== undefined ? forceState : !currentState;
+                    geofs.autopilot.modes[modeName] = newState;
+                    if (modeName === 'heading') geofs.autopilot.modes['targetHeading'] = newState;
+                }
+
+                if (geofs.autopilot.modes && modeName === 'heading') {
+                    geofs.autopilot.modes.heading = true;
+                    geofs.autopilot.modes.targetHeading = true;
+                }
+
+                lastInteractionTime.hdg = Date.now();
+                pushValuesToGeoFS();
+                syncModeButtons();
+            }
+        } catch (err) {
+            console.warn('[GeoFS MCP] Mode notice:', err);
+        }
+    }
+
+    function syncModeButtons() {
+        if (typeof geofs !== 'undefined' && geofs.autopilot) {
+            const modes = geofs.autopilot.modes || {};
+            const map = {
+                speed: ['#set-ias', '#btn-spd'],
+                heading: ['#set-hdg', '#btn-hdghold'],
+                verticalSpeed: ['#set-vs', '#btn-vshold'],
+                altitude: ['#set-alt', '#btn-althold']
+            };
+
+            Object.keys(map).forEach(mode => {
+                const isActive = !!(modes[mode] || (mode === 'heading' && modes['targetHeading']));
+                map[mode].forEach(sel => {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                        if (isActive) el.classList.add('active');
+                        else el.classList.remove('active');
+                    }
+                });
+            });
+
+            const cmdBtn = document.getElementById('btn-cmd');
+            if (cmdBtn) {
+                if (geofs.autopilot.on) {
+                    cmdBtn.classList.add('active');
+                    cmdBtn.innerText = 'DISENGAGE';
+                } else {
+                    cmdBtn.classList.remove('active');
+                    cmdBtn.innerText = 'ENGAGE ALL';
+                }
+            }
+        }
+    }
+
+    function pullFromNativeUI() {
+        const now = Date.now();
+
+        updateAircraftTheme();
+
+        try {
+            if (typeof geofs !== 'undefined' && geofs.autopilot) {
+                const ap = geofs.autopilot;
+                const sourceVals = ap.values || ap;
+                const isHdgActive = !!(ap.modes && (ap.modes.heading || ap.modes.targetHeading));
+
+                const planeHdg = getPlaneHeading();
+                const stationary = isAircraftStationary();
+
+                const nativeIas = sourceVals.speed;
+
+                let nativeHdg;
+                if (stationary || !isHdgActive) {
+                    nativeHdg = (planeHdg !== null && planeHdg !== undefined)
+                        ? planeHdg
+                        : (sourceVals.targetHeading !== undefined ? sourceVals.targetHeading : ap.targetHeading);
+                } else {
+                    nativeHdg = (sourceVals.targetHeading !== undefined ? sourceVals.targetHeading : (sourceVals.heading !== undefined ? sourceVals.heading : ap.targetHeading));
+                }
+
+                const nativeAlt = sourceVals.altitude;
+                const nativeVs = sourceVals.verticalSpeed !== undefined ? sourceVals.verticalSpeed : sourceVals.climbRate;
+
+                const map = { ias: nativeIas, hdg: nativeHdg, alt: nativeAlt, vs: nativeVs };
+
+                Object.keys(map).forEach(key => {
+                    if (now - (lastInteractionTime[key] || 0) < 1000) return;
+
+                    let nativeVal = map[key];
+                    if (nativeVal !== undefined && nativeVal !== null && !isNaN(parseFloat(nativeVal))) {
+                        let rounded = Math.round(parseFloat(nativeVal));
+                        if (key === 'hdg') rounded = (rounded % 360 + 360) % 360;
+
+                        if (rounded !== values[key]) {
+                            let diff = rounded - values[key];
+                            if (key === 'hdg') {
+                                if (diff > 180) diff -= 360;
+                                if (diff < -180) diff += 360;
+                            }
+                            values[key] = rounded;
+                            updateDisplay(key, diff);
+                        }
+                    }
+                });
+
+                syncModeButtons();
+            }
+        } catch (err) {
+            console.warn('[GeoFS MCP] Pull notice:', err);
+        }
+    }
+
+    setInterval(pullFromNativeUI, 200);
+
+    const modeMapping = { ias: 'speed', hdg: 'heading', vs: 'verticalSpeed', alt: 'altitude' };
+
+    ['ias', 'hdg', 'vs', 'alt'].forEach(param => {
+        const setBtn = document.getElementById(`set-${param}`);
+        if (setBtn) {
+            setBtn.addEventListener('click', function() {
+                const modeName = modeMapping[param];
+                toggleGeoFSMode(modeName);
+            });
+        }
+    });
+
+    const bindBtnMode = (id, mode) => {
+        const btn = document.getElementById(id);
+        if (btn) {
+            btn.addEventListener('click', () => {
+                toggleGeoFSMode(mode);
+            });
+        }
+    };
+
+    bindBtnMode('btn-spd', 'speed');
+    bindBtnMode('btn-hdghold', 'heading');
+    bindBtnMode('btn-vshold', 'verticalSpeed');
+    bindBtnMode('btn-althold', 'altitude');
+
+    document.getElementById('btn-cmd').addEventListener('click', () => {
+        try {
+            if (typeof geofs !== 'undefined' && geofs.autopilot) {
+                if (!geofs.autopilot.on) {
+                    if (typeof geofs.autopilot.turnOn === 'function') geofs.autopilot.turnOn();
+                    else geofs.autopilot.on = true;
+                } else {
+                    if (typeof geofs.autopilot.turnOff === 'function') geofs.autopilot.turnOff();
+                    else geofs.autopilot.on = false;
+                }
+                pushValuesToGeoFS();
+                syncModeButtons();
+            }
+        } catch (err) {
+            console.warn('[GeoFS MCP] Engage notice:', err);
+        }
+    });
+
+    setTimeout(() => {
+        pullFromNativeUI();
+        ['ias', 'hdg', 'vs', 'alt'].forEach(param => updateDisplay(param, 0));
+    }, 1500);
+})();
