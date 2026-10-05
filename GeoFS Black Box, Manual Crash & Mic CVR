@@ -1,0 +1,763 @@
+// ==UserScript==
+// @name        GeoFS Black Box, Manual Crash & Mic CVR V1
+// @namespace   https://geofs.blackbox.pro/
+// @version     1
+// @description NTSB FDR with rolling buffer, pause awareness, ZIP packaging, and resettable crash states.
+// @author      Cleaned Script (V1)
+// @license     MIT
+// @match       https://www.geo-fs.com/geofs.php*
+// @icon        https://www.google.com/s2/favicons?sz=64&domain=geo-fs.com
+// @require     https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @grant       none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let recorderActive = true;
+    let flightCrashed = false;
+    let flightDataBuffer = [];
+    let flightEvents = [];
+    let cvrLog = [];
+
+    const MAX_BUFFER_LENGTH = 30 * 60;
+
+    let mediaRecorder = null;
+    let recordedAudioChunks = [];
+    let audioBlobURL = null;
+    let activeMimeType = 'audio/webm;codecs=opus';
+    let micStreamActive = false;
+    let speechRecognizer = null;
+    let isTranscribing = false;
+
+    // Added for mic stability
+    let micStream = null;
+    let recognizerRunning = false;
+    let micInitializing = false;
+
+    // Aircraft change / replay state
+    let lastAircraftId = null;
+    let replayActive = false;
+    let menuHidden = false;          // toggled with the V key
+    let exitPlayerCache = false;
+    let exitPlayerCheckedAt = 0;
+
+    const UI_BUTTON_IDS = ['geofs-blackbox-btn', 'geofs-blackbox-crash', 'geofs-blackbox-report'];
+
+    function getAircraftId(g) {
+        try {
+            const inst = g.aircraft && g.aircraft.instance;
+            if (!inst) return null;
+            if (inst.id !== undefined && inst.id !== null) return String(inst.id);
+            if (inst.aircraftRecord && inst.aircraftRecord.id !== undefined) return String(inst.aircraftRecord.id);
+        } catch (e) {}
+        return null;
+    }
+
+    function isReplayMode(g) {
+        try {
+            const fr = g.flightRecorder;
+            if (fr && (fr.playing === true || fr.isPlaying === true || fr.replay === true)) return true;
+            if (g.replay && (g.replay.playing === true || g.replay.active === true)) return true;
+            if (g.isReplaying === true) return true;
+        } catch (e) {}
+        // Fallback: the replay bar shows an "EXIT PLAYER" button (checked once per second)
+        const now = Date.now();
+        if (now - exitPlayerCheckedAt > 1000) {
+            exitPlayerCheckedAt = now;
+            exitPlayerCache = Array.from(document.querySelectorAll('button, a, .mdl-button')).some(el =>
+                el.offsetParent !== null && (el.textContent || '').trim().toUpperCase() === 'EXIT PLAYER'
+            );
+        }
+        return exitPlayerCache;
+    }
+
+    function applyUiVisibility() {
+        const hide = menuHidden;
+        UI_BUTTON_IDS.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = hide ? 'none' : '';
+        });
+        if (hide) {
+            const modal = document.getElementById('geofs-bb-modal');
+            if (modal) modal.remove();
+        }
+    }
+
+    // During replay, V shows / hides the black box menu
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'v' && e.key !== 'V') return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        menuHidden = !menuHidden;
+        applyUiVisibility();
+    });
+
+    // Full reset when a different aircraft is selected
+    function resetForNewAircraft() {
+        flightDataBuffer = [];
+        flightEvents = [];
+        cvrLog = [];
+        lastLogTime = 0;
+        flightCrashed = false;
+        recorderActive = true;
+        isTranscribing = true;
+
+        // Stop the old recorder without letting its late data leak into the new recording
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.ondataavailable = null;
+            mediaRecorder.onstop = null;
+            try { mediaRecorder.stop(); } catch (e) {}
+        }
+        recordedAudioChunks = [];
+        if (audioBlobURL) { URL.revokeObjectURL(audioBlobURL); audioBlobURL = null; }
+        try { startMediaRecorder(); } catch (e) {}
+        startSpeech();
+
+        logCVREntry("SYSTEM", "New aircraft selected. Black Box reset.", new Date().toLocaleTimeString());
+
+        const modal = document.getElementById('geofs-bb-modal');
+        if (modal) modal.remove();
+        const bbBtn = document.getElementById('geofs-blackbox-btn');
+        if (bbBtn) updateButtonState(bbBtn);
+    }
+
+    // ---------------------------------------------------------------
+    // MIC / SPEECH
+    // ---------------------------------------------------------------
+    function startMediaRecorder() {
+        if (!micStream) return;
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') return;
+
+        mediaRecorder = activeMimeType
+            ? new MediaRecorder(micStream, { mimeType: activeMimeType })
+            : new MediaRecorder(micStream);
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) recordedAudioChunks.push(event.data);
+        };
+        mediaRecorder.onstop = () => { generateAudioBlob(); };
+
+        mediaRecorder.start(1000);
+        micStreamActive = true;
+    }
+
+    function startSpeech() {
+        if (!speechRecognizer || recognizerRunning || flightCrashed || !isTranscribing) return;
+        try { speechRecognizer.start(); } catch (e) {}
+    }
+
+    function setupSpeechRecognition() {
+        if (speechRecognizer) return; // only create once
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) return;
+
+        speechRecognizer = new SpeechRecognition();
+        speechRecognizer.continuous = true;
+        speechRecognizer.interimResults = false;
+        speechRecognizer.lang = 'en-US';
+
+        speechRecognizer.onstart = () => { recognizerRunning = true; };
+
+        speechRecognizer.onresult = (event) => {
+            if (!recorderActive || flightCrashed) return;
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                if (event.results[i].isFinal) {
+                    let spokenText = event.results[i][0].transcript.trim();
+                    if (spokenText) {
+                        let timeStr = new Date().toLocaleTimeString();
+                        logCVREntry("PILOT (SPEECH)", spokenText, timeStr);
+
+                        let transcriptBox = document.getElementById('cvr-transcript-box');
+                        if (transcriptBox) {
+                            transcriptBox.innerHTML = cvrLog.map(c => `<div style="margin-bottom: 4px;"><b style="color: #38bdf8;">[${c.time}]</b> <span style="color: #f43f5e; font-weight: bold;">${c.speaker}:</span> <span style="color: #f3f4f6;">"${c.message}"</span></div>`).join('');
+                            transcriptBox.scrollTop = transcriptBox.scrollHeight;
+                        }
+                    }
+                }
+            }
+        };
+
+        speechRecognizer.onerror = (err) => {
+            // Permission problems are permanent; everything else (no-speech, network, aborted) is retried
+            if (err.error === 'not-allowed' || err.error === 'service-not-allowed') {
+                isTranscribing = false;
+            }
+        };
+
+        // Restart regardless of pause state; only a crash lock or permission denial stops it
+        speechRecognizer.onend = () => {
+            recognizerRunning = false;
+            setTimeout(startSpeech, 300);
+        };
+
+        isTranscribing = true;
+        startSpeech();
+    }
+
+    async function initMicrophoneRecorder() {
+        if (micInitializing) return;
+        micInitializing = true;
+        try {
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+            if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                activeMimeType = 'audio/webm;codecs=opus';
+            } else if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+                activeMimeType = 'audio/ogg;codecs=opus';
+            } else {
+                activeMimeType = '';
+            }
+
+            startMediaRecorder();
+            logCVREntry("SYSTEM", `CAM active. Rolling buffer online.`, new Date().toLocaleTimeString());
+        } catch (err) {
+            logCVREntry("SYSTEM", "Warning: Microphone access denied.", new Date().toLocaleTimeString());
+        }
+        setupSpeechRecognition();
+        micInitializing = false;
+    }
+
+    // Watchdog: revives the mic / recorder / speech if anything dies (aircraft switch, tab throttling, etc.)
+    setInterval(() => {
+        if (flightCrashed) return;
+
+        const track = micStream && micStream.getAudioTracks()[0];
+        if (!micStream || !track || track.readyState === 'ended') {
+            micStream = null;
+            micStreamActive = false;
+            initMicrophoneRecorder();
+            return;
+        }
+
+        if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+            try { startMediaRecorder(); } catch (e) {}
+        }
+
+        if (speechRecognizer) {
+            isTranscribing = true;
+            startSpeech();
+        }
+    }, 2000);
+
+    function generateAudioBlob() {
+        if (recordedAudioChunks.length === 0) return;
+        const audioBlob = new Blob(recordedAudioChunks, { type: activeMimeType });
+        if (audioBlobURL) URL.revokeObjectURL(audioBlobURL);
+        audioBlobURL = URL.createObjectURL(audioBlob);
+
+        const audioEl = document.getElementById('geofs-cvr-audio-player');
+        if (audioEl) {
+            audioEl.src = audioBlobURL;
+            audioEl.load();
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // ZIP EXPORT
+    // ---------------------------------------------------------------
+    async function downloadBlackBoxZipPackage() {
+        if (typeof JSZip === 'undefined') {
+            alert("JSZip library is still loading, please try again in a moment.");
+            return;
+        }
+
+        const zip = new JSZip();
+        const folder = zip.folder("black box recordings");
+
+        let exportPayload = {
+            systemNote: "NTSB FDR Data Package - Last 30 Minutes Rolling FIFO Buffer",
+            events: flightEvents,
+            cvrTranscript: cvrLog,
+            telemetry: flightDataBuffer
+        };
+        folder.file("fdr_telemetry_data.json", JSON.stringify(exportPayload, null, 2));
+
+        let transcriptText = "=== COCKPIT VOICE RECORDER (CVR) TRANSCRIPT ===\n";
+        transcriptText += `Exported: ${new Date().toLocaleString()}\n\n`;
+        if (cvrLog.length > 0) {
+            transcriptText += cvrLog.map(c => `[${c.time}] ${c.speaker}: "${c.message}"`).join('\n');
+        } else {
+            transcriptText += "No audio transcripts recorded.";
+        }
+        folder.file("cvr_transcript.txt", transcriptText);
+
+        if (recordedAudioChunks.length > 0) {
+            let extension = activeMimeType.includes('ogg') ? 'ogg' : 'webm';
+            const audioBlob = new Blob(recordedAudioChunks, { type: activeMimeType });
+            folder.file(`cvr_recording.${extension}`, audioBlob);
+        }
+
+        const zipContent = await zip.generateAsync({ type: "blob" });
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.href = URL.createObjectURL(zipContent);
+        downloadAnchor.download = "black_box_recordings.zip";
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+    }
+
+    setTimeout(initMicrophoneRecorder, 2000);
+
+    // ---------------------------------------------------------------
+    // UI BUTTONS
+    // ---------------------------------------------------------------
+    setInterval(() => {
+        const toolbar = document.querySelector('div.geofs-ui-bottom') ||
+                        document.querySelector('.geofs-options-ground') ||
+                        document.querySelector('.geofs-ui-left') ||
+                        document.querySelector('.mdl-layout__header-row');
+
+        if (toolbar && !document.getElementById('geofs-blackbox-btn')) {
+            const bbBtn = document.createElement('button');
+            bbBtn.id = 'geofs-blackbox-btn';
+            bbBtn.className = 'mdl-button mdl-js-button mdl-button--raised mdl-button--colored';
+            bbBtn.style.cssText = "margin-left: 10px; background-color: #37474f !important; color: white; font-weight: bold; font-size: 11px; z-index: 99999;";
+            updateButtonState(bbBtn);
+            bbBtn.addEventListener('click', openBlackBoxWindow);
+            toolbar.appendChild(bbBtn);
+
+            const crashBtn = document.createElement('button');
+            crashBtn.id = 'geofs-blackbox-crash';
+            crashBtn.className = 'mdl-button mdl-js-button mdl-button--raised';
+            crashBtn.style.cssText = "margin-left: 5px; background-color: #991b1b !important; color: white; font-weight: bold; font-size: 11px; z-index: 99999;";
+            crashBtn.innerText = "💥 CRASH / RESET";
+            crashBtn.addEventListener('click', () => {
+                if (!flightCrashed) {
+                    if (confirm("Lock Black Box due to crash?")) {
+                        let currentPt = flightDataBuffer[flightDataBuffer.length - 1] || { agl: 0, vertSpeed: -1500, time: new Date().toLocaleTimeString() };
+                        triggerCrashSequence(currentPt);
+                    }
+                } else {
+                    if (confirm("Reset Black Box and resume recording?")) {
+                        resetCrashSequence();
+                    }
+                }
+            });
+            toolbar.appendChild(crashBtn);
+
+            const reportBtn = document.createElement('button');
+            reportBtn.id = 'geofs-blackbox-report';
+            reportBtn.className = 'mdl-button mdl-js-button mdl-button--raised';
+            reportBtn.style.cssText = `margin-left: 5px; background-color: #0277bd !important; color: white; font-weight: bold; font-size: 11px; z-index: 99999; display: inline-block;`;
+            reportBtn.innerText = "📋 Open FDR & CVR Pro";
+            reportBtn.addEventListener('click', openBlackBoxWindow);
+            toolbar.appendChild(reportBtn);
+            applyUiVisibility();
+        }
+    }, 1000);
+
+    function updateButtonState(btn) {
+        if (flightCrashed) {
+            btn.innerText = "💥 VIEW FDR (LOCKED)";
+            btn.style.backgroundColor = "#c62828 !important";
+        } else if (!recorderActive) {
+            btn.innerText = "⏸️ FDR: PAUSED";
+            btn.style.backgroundColor = "#d97706 !important";
+        } else {
+            btn.innerText = "🔴 FDR (30-MIN LOOP): REC v3.6";
+            btn.style.backgroundColor = "#d32f2f !important";
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // TELEMETRY LOGGER
+    // ---------------------------------------------------------------
+    let lastLogTime = 0;
+
+    setInterval(() => {
+        let geofsRef = window.geofs || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.geofs : null);
+        if (!geofsRef || !geofsRef.animation || !geofsRef.animation.values) return;
+
+        let v = geofsRef.animation.values;
+        let isPaused = (typeof geofsRef.isPaused === 'function' && geofsRef.isPaused()) || geofsRef.animation.paused === true;
+
+        // New aircraft selected -> reset everything
+        let acId = getAircraftId(geofsRef);
+        if (acId !== null) {
+            if (lastAircraftId !== null && acId !== lastAircraftId) resetForNewAircraft();
+            lastAircraftId = acId;
+        }
+
+        // Replay mode -> hide menu (V toggles it) and don't record replay data
+        let inReplay = isReplayMode(geofsRef);
+        if (inReplay !== replayActive) {
+            replayActive = inReplay;
+            menuHidden = replayActive;
+            applyUiVisibility();
+        }
+
+        if (isPaused || inReplay || flightCrashed) {
+            if (recorderActive && !flightCrashed) {
+                recorderActive = false;
+                const bbBtn = document.getElementById('geofs-blackbox-btn');
+                if (bbBtn) updateButtonState(bbBtn);
+            }
+            return;
+        } else {
+            if (!recorderActive && !flightCrashed) {
+                recorderActive = true;
+                const bbBtn = document.getElementById('geofs-blackbox-btn');
+                if (bbBtn) updateButtonState(bbBtn);
+            }
+        }
+
+        let now = Date.now();
+        let onGround = v.groundContact === 1 || v.onGround === true;
+        let verticalSpeed = v.verticalSpeed !== undefined ? v.verticalSpeed : (v.vz ? v.vz * 60 : 0);
+
+        if (recorderActive && !flightCrashed) {
+            if (now - lastLogTime >= 1000) {
+                lastLogTime = now;
+
+                let gearStatus = v.gearPosition !== undefined ? (v.gearPosition > 0.5 ? "DOWN" : "UP") : (v.gear ? "DOWN" : "UP");
+                let flapsVal = v.flaps !== undefined ? Math.round(v.flaps * 100) : (v.flapPosition !== undefined ? Math.round(v.flapPosition * 100) : 0);
+                let throttleVal = v.throttle !== undefined ? Math.round(v.throttle * 100) : (v.N1 !== undefined ? Math.round(v.N1) : 0);
+
+                let kiasVal = Math.round(v.kias || v.knots || v.indicatedAirspeed || 0);
+                let gndSpeedVal = Math.round(v.groundSpeed || 0);
+                let trimVal = v.elevatorTrim !== undefined ? Number(v.elevatorTrim.toFixed(2)) : 0;
+                let aoaVal = v.angleOfAttack !== undefined ? Number(v.angleOfAttack.toFixed(1)) : 0.0;
+                let gForceVal = v.gForce !== undefined ? Number(v.gForce.toFixed(2)) : (v.accZ !== undefined ? Number((v.accZ / 9.80665).toFixed(2)) : 1.0);
+                let fuelVal = v.fuel !== undefined ? Math.round(v.fuel) : 100;
+
+                let latVal = v.latitude !== undefined ? v.latitude : (geofsRef.aircraft && geofsRef.aircraft.instance && geofsRef.aircraft.instance.lla ? geofsRef.aircraft.instance.lla[0] : 0);
+                let lonVal = v.longitude !== undefined ? v.longitude : (geofsRef.aircraft && geofsRef.aircraft.instance && geofsRef.aircraft.instance.lla ? geofsRef.aircraft.instance.lla[1] : 0);
+
+                let altVal = Math.round(v.altitude || 0);
+                let groundElevation = Math.round(v.groundElevationFeet || v.elevation || 0);
+                let aglVal = Math.max(0, altVal - groundElevation);
+
+                let dataPoint = {
+                    time: new Date().toLocaleTimeString(),
+                    timestamp: now,
+                    altitude: altVal,
+                    agl: aglVal,
+                    speedKias: kiasVal,
+                    groundSpeed: gndSpeedVal,
+                    pitch: Number((v.pitch || v.atilt || 0).toFixed(2)),
+                    roll: Number((v.roll || v.aroll || 0).toFixed(2)),
+                    heading: Math.round(v.heading || v.azimuth || 0),
+                    vertSpeed: Math.round(verticalSpeed),
+                    elevator: Number((v.elevator || 0).toFixed(2)),
+                    aileron: Number((v.aileron || 0).toFixed(2)),
+                    rudder: Number((v.rudder || 0).toFixed(2)),
+                    throttle: throttleVal,
+                    flaps: flapsVal,
+                    gear: gearStatus,
+                    trim: trimVal,
+                    aoa: aoaVal,
+                    gForce: gForceVal,
+                    fuel: fuelVal,
+                    lat: Number(latVal.toFixed(5)),
+                    lon: Number(lonVal.toFixed(5)),
+                    onGround: onGround
+                };
+
+                flightDataBuffer.push(dataPoint);
+                if (flightDataBuffer.length > MAX_BUFFER_LENGTH) {
+                    flightDataBuffer.shift();
+                }
+            }
+        }
+    }, 200);
+
+    // ---------------------------------------------------------------
+    // EVENT LOGGING / CRASH / RESET
+    // ---------------------------------------------------------------
+    function logFlightEvent(title, desc, timeStr) {
+        flightEvents.push({ title: title, description: desc, time: timeStr });
+    }
+
+    function logCVREntry(speaker, message, timeStr) {
+        cvrLog.push({ speaker: speaker, message: message, time: timeStr });
+        if (cvrLog.length > 1800) cvrLog.shift();
+    }
+
+    function triggerCrashSequence(point) {
+        if (flightCrashed) return;
+        flightCrashed = true;
+        recorderActive = false;
+        isTranscribing = false;
+
+        if (mediaRecorder && micStreamActive && mediaRecorder.state !== "inactive") {
+            mediaRecorder.requestData();
+            mediaRecorder.stop();
+        }
+        if (speechRecognizer) {
+            try { speechRecognizer.stop(); } catch(e) {}
+        }
+
+        logFlightEvent(`💥 ACCIDENT SEQUENCE`, `Impact detected at ${point.agl} ft AGL. Loop locked.`, point.time);
+        logCVREntry("GPWS / IMPACT", `Terrain alert. Accident sequence locked.`, point.time);
+
+        const bbBtn = document.getElementById('geofs-blackbox-btn');
+        if (bbBtn) updateButtonState(bbBtn);
+    }
+
+    function resetCrashSequence() {
+        flightCrashed = false;
+        recorderActive = true;
+        isTranscribing = true;
+
+        // Crash stopped the recorder, so start a fresh one (new file, so the audio stays valid)
+        recordedAudioChunks = [];
+        try { startMediaRecorder(); } catch (e) {}
+        startSpeech();
+
+        logCVREntry("SYSTEM", `Black Box reset by pilot. Recording resumed.`, new Date().toLocaleTimeString());
+
+        const bbBtn = document.getElementById('geofs-blackbox-btn');
+        if (bbBtn) updateButtonState(bbBtn);
+    }
+
+    // ---------------------------------------------------------------
+    // FDR / CVR WINDOW
+    // ---------------------------------------------------------------
+    function openBlackBoxWindow() {
+        let existingModal = document.getElementById('geofs-bb-modal');
+        if (existingModal) existingModal.remove();
+
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+            mediaRecorder.requestData();
+        }
+        generateAudioBlob();
+
+        const modal = document.createElement('div');
+        modal.id = 'geofs-bb-modal';
+        modal.style.cssText = `
+            position: fixed; top: 2%; left: 2%; width: 96%; height: 96%;
+            background: #0b0f15; color: #cfd8dc; border: 2px solid #1f2937;
+            box-shadow: 0 15px 50px rgba(0,0,0,0.95); z-index: 100000;
+            font-family: monospace; padding: 20px; overflow-y: auto; border-radius: 8px;
+        `;
+
+        let html = `
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #1f2937; padding-bottom: 10px;">
+                <h2 style="margin: 0; color: #f3f4f6; font-size: 18px;">✈️ NTSB FDR & CVR PRO v3.6 (Resettable)</h2>
+                <button id="geofs-bb-close" style="background: #991b1b; color: white; border: none; padding: 6px 14px; cursor: pointer; font-weight: bold; border-radius: 4px;">X</button>
+            </div>
+
+            <p style="font-size: 12px; color: #9ca3af; margin-top: 10px;">Status: ${flightCrashed ? '🔴 LOCKED (CRASH)' : (!recorderActive ? '⏸️ PAUSED' : '🟢 ACTIVE')} | Samples: ${flightDataBuffer.length} / 1800</p>
+
+            <div style="margin: 15px 0; display: flex; gap: 10px; flex-wrap: wrap;">
+                <button id="geofs-bb-export-zip" style="background: #15803d; color: white; border: none; padding: 6px 14px; cursor: pointer; border-radius: 4px; font-weight: bold;">📦 Download Black Box Package (.zip)</button>
+                <button id="geofs-bb-refresh" style="background: #374151; color: white; border: none; padding: 6px 14px; cursor: pointer; border-radius: 4px; font-weight: bold;">🔄 Refresh Graphs & Audio</button>
+                ${flightCrashed ? '<button id="geofs-bb-unfreeze" style="background: #b91c1c; color: white; border: none; padding: 6px 14px; cursor: pointer; border-radius: 4px; font-weight: bold;">🔓 Unlock / Resume Recording</button>' : ''}
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div style="background: #111827; border: 1px solid #1f2937; padding: 12px; border-radius: 6px;">
+                    <h3 style="margin: 0 0 8px 0; font-size: 13px; color: #38bdf8;">📌 Automated Flight Phase Timeline</h3>
+                    <div style="max-height: 130px; overflow-y: auto; font-size: 11px;">
+                        ${flightEvents.length === 0 ? '<span style="color: #6b7280;">No major events logged yet.</span>' : ''}
+                        <ul style="margin: 0; padding-left: 15px;">
+                            ${flightEvents.map(ev => `<li style="margin-bottom: 4px;"><b style="color: #f3f4f6;">[${ev.time}]</b> <span style="color: #fbbf24;">${ev.title}</span>: <span style="color: #9ca3af;">${ev.description}</span></li>`).join('')}
+                        </ul>
+                    </div>
+                </div>
+
+                <div style="background: #111827; border: 1px solid #1f2937; padding: 12px; border-radius: 6px; display: flex; flex-direction: column;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <h3 style="margin: 0; font-size: 13px; color: #f43f5e;">🎙️ Speech Transcript & Audio Playback</h3>
+                        <audio id="geofs-cvr-audio-player" controls src="${audioBlobURL || ''}" style="height: 28px; width: 200px;"></audio>
+                    </div>
+                    <div id="cvr-transcript-box" style="max-height: 100px; overflow-y: auto; font-size: 11px; flex-grow: 1; border: 1px solid #1f2937; padding: 6px; background: #030712; border-radius: 4px; margin-bottom: 8px;">
+                        ${cvrLog.length === 0 ? '<span style="color: #6b7280;">Speak into your microphone—speech will automatically transcribe here...</span>' : ''}
+                        ${cvrLog.map(c => `<div style="margin-bottom: 4px;"><b style="color: #38bdf8;">[${c.time}]</b> <span style="color: #f43f5e; font-weight: bold;">${c.speaker}:</span> <span style="color: #f3f4f6;">"${c.message}"</span></div>`).join('')}
+                    </div>
+                    <div style="display: flex; gap: 5px;">
+                        <input id="pilot-note-input" type="text" placeholder="Type manual log note..." style="flex-grow: 1; background: #1f2937; border: 1px solid #374151; color: white; padding: 4px 8px; font-size: 11px; border-radius: 3px;">
+                        <button id="pilot-note-btn" style="background: #0284c7; color: white; border: none; padding: 4px 10px; font-size: 11px; font-weight: bold; cursor: pointer; border-radius: 3px;">Add Note</button>
+                    </div>
+                </div>
+            </div>
+
+            <div style="background: #111827; border: 1px solid #1f2937; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                <h3 style="margin: 0 0 8px 0; font-size: 13px; color: #60a5fa;">📊 NTSB-Style Multi-Channel Telemetry Tracks</h3>
+                <div style="position: relative;">
+                    <canvas id="geofs-fdr-canvas" width="1200" height="500" style="width: 100%; height: 500px; background: #030712; display: block; border-radius: 4px; border: 1px solid #1f2937; cursor: crosshair;"></canvas>
+                    <div id="geofs-hover-tooltip" style="position: absolute; display: none; background: rgba(15, 23, 42, 0.96); border: 1px solid #38bdf8; padding: 10px 14px; border-radius: 6px; font-size: 11px; color: #f3f4f6; pointer-events: none; z-index: 100; box-shadow: 0 8px 24px rgba(0,0,0,0.85); min-width: 200px;"></div>
+                </div>
+            </div>
+        `;
+
+        modal.innerHTML = html;
+        document.body.appendChild(modal);
+
+        setTimeout(() => { setupInteractiveCharts(); }, 50);
+
+        document.getElementById('geofs-bb-close').addEventListener('click', () => modal.remove());
+        document.getElementById('geofs-bb-refresh').addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                mediaRecorder.requestData();
+            }
+            openBlackBoxWindow();
+        });
+
+        document.getElementById('geofs-bb-export-zip').addEventListener('click', downloadBlackBoxZipPackage);
+
+        let unfreezeBtn = document.getElementById('geofs-bb-unfreeze');
+        if (unfreezeBtn) {
+            unfreezeBtn.addEventListener('click', () => {
+                resetCrashSequence();
+                openBlackBoxWindow();
+            });
+        }
+
+        document.getElementById('pilot-note-btn').addEventListener('click', () => {
+            let inputField = document.getElementById('pilot-note-input');
+            let noteText = inputField.value.trim();
+            if (noteText) {
+                let timeStr = new Date().toLocaleTimeString();
+                logCVREntry("PILOT NOTE", noteText, timeStr);
+                inputField.value = "";
+                openBlackBoxWindow();
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // CHARTS
+    // ---------------------------------------------------------------
+    function setupInteractiveCharts() {
+        const canvas = document.getElementById('geofs-fdr-canvas');
+        const tooltip = document.getElementById('geofs-hover-tooltip');
+        if (!canvas || !tooltip || flightDataBuffer.length === 0) return;
+        const ctx = canvas.getContext('2d');
+        let w = canvas.width, h = canvas.height;
+
+        const numTracks = 5;
+        let trackHeight = h / numTracks;
+
+        const tracksConfig = [
+            { title: 'TRACK 1: ALTITUDE PROFILE', items: [{key: 'altitude', color: '#4ade80', label: 'Alt (ft)'}, {key: 'agl', color: '#34d399', label: 'AGL (ft)'}] },
+            { title: 'TRACK 2: VERTICAL SPEED', items: [{key: 'vertSpeed', color: '#f87171', label: 'V/S (fpm)'}] },
+            { title: 'TRACK 3: AIRSPEED & GROUNDSPEED', items: [{key: 'speedKias', color: '#38bdf8', label: 'KIAS (kts)'}, {key: 'groundSpeed', color: '#7dd3fc', label: 'Gnd Spd (kts)'}] },
+            { title: 'TRACK 4: G-FORCE & ANGLE OF ATTACK', items: [{key: 'gForce', color: '#fbbf24', label: 'G-Force'}, {key: 'aoa', color: '#fb923c', label: 'AoA (°)'}] },
+            { title: 'TRACK 5: ATTITUDE (PITCH/ROLL)', items: [{key: 'pitch', color: '#c084fc', label: 'Pitch (°)'}, {key: 'roll', color: '#e879f9', label: 'Roll (°)'}] }
+        ];
+
+        function redrawCanvas(highlightIndex = -1) {
+            ctx.clearRect(0, 0, w, h);
+
+            for (let x = 0; x < w; x += 60) {
+                ctx.strokeStyle = '#111827';
+                ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+            }
+
+            for (let t = 1; t < numTracks; t++) {
+                ctx.strokeStyle = '#1f2937';
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(0, t * trackHeight); ctx.lineTo(w, t * trackHeight); ctx.stroke();
+            }
+
+            let maxPoints = flightDataBuffer.length;
+            if (maxPoints < 2) return;
+            let stepX = w / (maxPoints - 1);
+
+            tracksConfig.forEach((trk, trackIndex) => {
+                let tTop = trackIndex * trackHeight, tH = trackHeight;
+                ctx.fillStyle = '#9ca3af';
+                ctx.font = 'bold 10px monospace';
+                ctx.fillText(trk.title, 10, tTop + 14);
+
+                let legendXOffset = 220;
+                trk.items.forEach(item => {
+                    let vals = flightDataBuffer.map(d => d[item.key]);
+                    let minVal = Math.min(...vals), maxVal = Math.max(...vals);
+                    let range = (maxVal - minVal) || 1;
+
+                    ctx.fillStyle = item.color;
+                    ctx.font = '9px monospace';
+                    ctx.fillText(`${item.label} [Min:${minVal.toFixed(1)} Max:${maxVal.toFixed(1)}]`, legendXOffset, tTop + 14);
+                    legendXOffset += 180;
+
+                    ctx.strokeStyle = item.color;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    for (let i = 0; i < maxPoints; i++) {
+                        let val = flightDataBuffer[i][item.key];
+                        let x = i * stepX;
+                        let normalized = (val - minVal) / range;
+                        let y = (tTop + tH - 6) - (normalized * (tH - 30));
+                        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                });
+            });
+
+            if (highlightIndex >= 0 && highlightIndex < maxPoints) {
+                let hx = highlightIndex * stepX;
+                ctx.strokeStyle = '#38bdf8';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(hx, 0);
+                ctx.lineTo(hx, h);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
+        redrawCanvas();
+
+        canvas.onmousemove = function(e) {
+            let rect = canvas.getBoundingClientRect();
+            let mouseX = e.clientX - rect.left;
+            let mouseY = e.clientY - rect.top;
+
+            let scaleX = canvas.width / rect.width;
+            let internalX = mouseX * scaleX;
+
+            let maxPoints = flightDataBuffer.length;
+            if (maxPoints === 0) return;
+
+            let stepX = w / (maxPoints > 1 ? maxPoints - 1 : 1);
+            let closestIndex = Math.round(internalX / stepX);
+            closestIndex = Math.max(0, Math.min(maxPoints - 1, closestIndex));
+
+            let pt = flightDataBuffer[closestIndex];
+            if (!pt) return;
+
+            redrawCanvas(closestIndex);
+
+            let tooltipHTML = `
+                <div style="border-bottom: 1px solid #38bdf8; padding-bottom: 4px; margin-bottom: 6px; font-weight: bold; color: #38bdf8;">
+                    ⏱️ TIME: ${pt.time} (Sample ${closestIndex + 1} / ${maxPoints})
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 10px;">
+                    <div><b>Altitude:</b> <span style="color: #4ade80;">${pt.altitude} ft</span></div>
+                    <div><b>AGL:</b> <span style="color: #34d399;">${pt.agl} ft</span></div>
+                    <div><b>Airspeed:</b> <span style="color: #38bdf8;">${pt.speedKias} KIAS</span></div>
+                    <div><b>Gnd Speed:</b> <span style="color: #7dd3fc;">${pt.groundSpeed} kts</span></div>
+                    <div><b>Vert Speed:</b> <span style="color: #f87171;">${pt.vertSpeed} fpm</span></div>
+                    <div><b>G-Force:</b> <span style="color: #fbbf24;">${pt.gForce} G</span></div>
+                    <div><b>Pitch:</b> <span style="color: #c084fc;">${pt.pitch}°</span></div>
+                    <div><b>Roll:</b> <span style="color: #e879f9;">${pt.roll}°</span></div>
+                    <div><b>Throttle:</b> <span style="color: #fca5a5;">${pt.throttle}%</span></div>
+                    <div><b>Flaps:</b> <span style="color: #fde047;">${pt.flaps}%</span></div>
+                </div>
+            `;
+
+            tooltip.innerHTML = tooltipHTML;
+            tooltip.style.display = 'block';
+
+            let tipX = mouseX + 15;
+            let tipY = mouseY + 15;
+            if (tipX + 240 > rect.width) tipX = mouseX - 250;
+            if (tipY + 160 > rect.height) tipY = mouseY - 170;
+
+            tooltip.style.left = tipX + 'px';
+            tooltip.style.top = tipY + 'px';
+        };
+
+        canvas.onmouseleave = function() {
+            tooltip.style.display = 'none';
+            redrawCanvas();
+        };
+    }
+
+})();
