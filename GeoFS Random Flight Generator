@@ -1,0 +1,202 @@
+// ==UserScript==
+// @name         GeoFS Random Flight Generator
+// @namespace    https://geo-fs.com/
+// @version      1
+// @description  Adds a small panel to GeoFS that rolls a random destination, a random challenge, and optionally teleports you to the random airport.
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://geo-fs.com/geofs.php*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  // ---------- Data ----------
+  const AIRPORTS = [
+    { icao: "ENGM", name: "Oslo Gardermoen", lat: 60.1939, lon: 11.1004, hdg: 10 },
+    { icao: "EGLL", name: "London Heathrow", lat: 51.4700, lon: -0.4543, hdg: 270 },
+    { icao: "KJFK", name: "New York JFK", lat: 40.6398, lon: -73.7789, hdg: 40 },
+    { icao: "KSFO", name: "San Francisco Intl", lat: 37.6188, lon: -122.3750, hdg: 280 },
+    { icao: "LFPG", name: "Paris Charles de Gaulle", lat: 49.0097, lon: 2.5479, hdg: 270 },
+    { icao: "EDDF", name: "Frankfurt", lat: 50.0379, lon: 8.5622, hdg: 250 },
+    { icao: "OMDB", name: "Dubai Intl", lat: 25.2532, lon: 55.3657, hdg: 300 },
+    { icao: "VHHH", name: "Hong Kong Intl", lat: 22.3080, lon: 113.9185, hdg: 250 },
+    { icao: "RJTT", name: "Tokyo Haneda", lat: 35.5494, lon: 139.7798, hdg: 340 },
+    { icao: "YSSY", name: "Sydney Kingsford Smith", lat: -33.9399, lon: 151.1753, hdg: 340 },
+    { icao: "SBGL", name: "Rio de Janeiro Galeão", lat: -22.8100, lon: -43.2506, hdg: 150 },
+    { icao: "FACT", name: "Cape Town Intl", lat: -33.9648, lon: 18.6017, hdg: 10 },
+    { icao: "NZQN", name: "Queenstown", lat: -45.0211, lon: 168.7392, hdg: 50 },
+    { icao: "TNCM", name: "Princess Juliana (St. Maarten)", lat: 18.0410, lon: -63.1089, hdg: 100 },
+    { icao: "BIKF", name: "Keflavík", lat: 63.9850, lon: -22.6056, hdg: 100 },
+    { icao: "VNLK", name: "Lukla (Tenzing-Hillary)", lat: 27.6870, lon: 86.7295, hdg: 60 },
+    { icao: "LOWI", name: "Innsbruck", lat: 47.2602, lon: 11.3440, hdg: 260 },
+    { icao: "KLAX", name: "Los Angeles Intl", lat: 33.9425, lon: -118.4081, hdg: 250 },
+    { icao: "EHAM", name: "Amsterdam Schiphol", lat: 52.3105, lon: 4.7683, hdg: 180 },
+    { icao: "LTFM", name: "Istanbul Airport", lat: 41.2753, lon: 28.7519, hdg: 350 }
+  ];
+
+  const CHALLENGES = [
+    "Land with a vertical speed under 200 fpm.",
+    "Fly the whole route below 5,000 ft.",
+    "Make your final approach with flaps fully extended and gear down by 1,500 ft AGL.",
+    "Land within 300 m of the runway threshold.",
+    "Fly without using autopilot the whole way.",
+    "Take off and climb to cruise altitude without touching the trim.",
+    "Perform a 360° turn at 2,000 ft without losing more than 100 ft.",
+    "Keep your speed within ±10 knots of your target the whole approach.",
+    "Land with the nose wheel touching down last.",
+    "Fly a full traffic pattern: upwind, crosswind, downwind, base, final.",
+    "Cruise at exactly FL100 (±50 ft) for five minutes.",
+    "Do a go-around at 200 ft AGL, then land on the second try.",
+    "Taxi to the runway without using the brakes more than five times.",
+    "Fly the route using only visual references (no map)."
+  ];
+
+  const FACTS = [
+    "Wind direction on a METAR is where the wind comes FROM.",
+    "Runway numbers are the magnetic heading rounded to the nearest 10°, divided by 10.",
+    "Rule of thumb: a 3° glideslope is about 300 ft of descent per nautical mile.",
+    "Airspeed is a pressure measurement, so true airspeed climbs relative to indicated as you go higher.",
+    "Cabin pressure on most airliners is kept near 6,000–8,000 ft equivalent.",
+    "A go-around is always a perfectly good decision.",
+    "Left and right engine rudder trim matters a lot on a twin with one engine out.",
+    "Altimeters are set to 1013 hPa (29.92 inHg) above the transition altitude."
+  ];
+
+  // ---------- Helpers ----------
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+  function haversineNm(lat1, lon1, lat2, lon2) {
+    const R = 3440.065; // Earth radius in nautical miles
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function currentPosition() {
+    try {
+      const lla = geofs.aircraft.instance.llaLocation;
+      if (lla && lla.length >= 2) return { lat: lla[0], lon: lla[1] };
+    } catch (e) {}
+    return null;
+  }
+
+  function teleport(ap) {
+    try {
+      geofs.flyTo([ap.lat, ap.lon, 0, ap.hdg]);
+    } catch (e) {
+      console.warn("[Random Flight] Teleport failed:", e);
+      alert("Teleport isn't available right now. Try again once the sim has fully loaded.");
+    }
+  }
+
+  // ---------- UI ----------
+  function buildPanel() {
+    const panel = document.createElement("div");
+    panel.id = "geofs-random-panel";
+    panel.style.cssText = [
+      "position:fixed", "top:80px", "right:12px", "width:260px", "z-index:99999",
+      "background:rgba(15,23,42,0.92)", "color:#e2e8f0", "font:13px/1.4 system-ui,sans-serif",
+      "border:1px solid #334155", "border-radius:10px", "box-shadow:0 6px 20px rgba(0,0,0,.4)",
+      "user-select:none"
+    ].join(";");
+
+    panel.innerHTML = `
+      <div id="gr-header" style="cursor:move;padding:8px 10px;font-weight:600;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #334155;">
+        <span>🎲 Random Flight</span>
+        <span id="gr-toggle" style="cursor:pointer;padding:0 6px;">–</span>
+      </div>
+      <div id="gr-body" style="padding:10px;">
+        <div id="gr-dest" style="margin-bottom:8px;color:#94a3b8;">Press the button to roll a destination.</div>
+        <div id="gr-challenge" style="margin-bottom:8px;color:#fbbf24;"></div>
+        <div id="gr-hud" style="margin-bottom:8px;font-variant-numeric:tabular-nums;color:#7dd3fc;"></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="gr-btn" id="gr-roll">Roll</button>
+          <button class="gr-btn" id="gr-tp" disabled>Teleport</button>
+          <button class="gr-btn" id="gr-fact">Fact</button>
+        </div>
+        <div id="gr-extra" style="margin-top:8px;font-size:12px;color:#a7f3d0;"></div>
+      </div>
+    `;
+
+    const style = document.createElement("style");
+    style.textContent = `
+      .gr-btn{background:#2563eb;color:#fff;border:0;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px}
+      .gr-btn:hover:not(:disabled){background:#1d4ed8}
+      .gr-btn:disabled{background:#334155;color:#64748b;cursor:not-allowed}
+    `;
+    document.head.appendChild(style);
+    document.body.appendChild(panel);
+
+    // State
+    let target = null;
+
+    const $ = (id) => panel.querySelector(id);
+
+    $("#gr-roll").onclick = () => {
+      target = pick(AIRPORTS);
+      const pos = currentPosition();
+      const dist = pos ? ` · ${Math.round(haversineNm(pos.lat, pos.lon, target.lat, target.lon))} nm away` : "";
+      $("#gr-dest").innerHTML = `<b style="color:#e2e8f0">${target.icao}</b> – ${target.name}${dist}`;
+      $("#gr-challenge").textContent = "Challenge: " + pick(CHALLENGES);
+      $("#gr-tp").disabled = false;
+    };
+
+    $("#gr-tp").onclick = () => target && teleport(target);
+    $("#gr-fact").onclick = () => { $("#gr-extra").textContent = pick(FACTS); };
+
+    // Collapse
+    $("#gr-toggle").onclick = () => {
+      const body = $("#gr-body");
+      const hidden = body.style.display === "none";
+      body.style.display = hidden ? "block" : "none";
+      $("#gr-toggle").textContent = hidden ? "–" : "+";
+    };
+
+    // Drag
+    const header = $("#gr-header");
+    let dragging = false, ox = 0, oy = 0;
+    header.addEventListener("mousedown", (e) => {
+      dragging = true;
+      const r = panel.getBoundingClientRect();
+      ox = e.clientX - r.left;
+      oy = e.clientY - r.top;
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      panel.style.left = e.clientX - ox + "px";
+      panel.style.top = e.clientY - oy + "px";
+      panel.style.right = "auto";
+    });
+    document.addEventListener("mouseup", () => (dragging = false));
+
+    // Live mini-HUD + distance to target
+    setInterval(() => {
+      try {
+        const v = geofs.animation.values;
+        const kias = Math.round(v.kias || 0);
+        const alt = Math.round(v.altitude || 0);
+        let line = `${kias} kt · ${alt} ft`;
+        if (target) {
+          const pos = currentPosition();
+          if (pos) line += ` · ${Math.round(haversineNm(pos.lat, pos.lon, target.lat, target.lon))} nm to ${target.icao}`;
+        }
+        $("#gr-hud").textContent = line;
+      } catch (e) {
+        $("#gr-hud").textContent = "";
+      }
+    }, 1000);
+  }
+
+  // Wait until GeoFS has finished loading
+  const wait = setInterval(() => {
+    if (window.geofs && geofs.aircraft && geofs.aircraft.instance && document.body) {
+      clearInterval(wait);
+      if (!document.getElementById("geofs-random-panel")) buildPanel();
+    }
+  }, 1000);
+})();
