@@ -1,0 +1,138 @@
+// ==UserScript==
+// @name         GeoFS Move around cockpit
+// @namespace    geofs-shift-move
+// @version      1
+// @description  Hold Shift + Arrow keys to MOVE the camera position around the aircraft (cockpit/cabin). Shift+E / Shift+Q (or PageUp/PageDown) = up/down, Shift+R (or Home) = reset.
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://*.geo-fs.com/geofs.php*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ---- Settings ------------------------------------------------------------
+  const SPEED = 0.7;          // meters per second (hold Ctrl for faster)
+  const FAST_MULT = 3;        // Ctrl speed multiplier
+  const FOLLOW_LOOK = true;   // move in the direction you're looking (true) or along the plane axes (false)
+  const INVERT_FWD = false;   // flip if forward/back feels backwards
+  const INVERT_STRAFE = false;
+  const INVERT_VERT = false;
+  // ---------------------------------------------------------------------------
+
+  const KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'KeyE', 'KeyQ'];
+  const held = {};
+  KEYS.forEach(k => (held[k] = false));
+  let shift = false, ctrl = false;
+  let last = performance.now();
+  const originals = new WeakMap(); // camera definition -> original position
+
+  const ready = () =>
+    typeof geofs !== 'undefined' && geofs.camera && geofs.camera.currentDefinition;
+
+  const typing = e => {
+    const t = e.target;
+    return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  };
+
+  function clearAll() {
+    KEYS.forEach(k => (held[k] = false));
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Shift') shift = true;
+    if (e.key === 'Control') ctrl = true;
+    if (typing(e)) return;
+
+    if ((e.code === 'Home' || e.code === 'KeyR') && e.shiftKey) {
+      resetPosition();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (KEYS.includes(e.code) && (e.shiftKey || shift)) {
+      held[e.code] = true;
+      e.preventDefault();
+      e.stopImmediatePropagation(); // keep GeoFS from also pitching/rolling the plane
+    }
+  }
+
+  function onKeyUp(e) {
+    if (e.key === 'Shift') { shift = false; clearAll(); }
+    if (e.key === 'Control') ctrl = false;
+    if (KEYS.includes(e.code)) {
+      if (held[e.code]) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+      held[e.code] = false;
+    }
+  }
+
+  window.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('keyup', onKeyUp, true);
+  window.addEventListener('blur', () => { shift = ctrl = false; clearAll(); });
+
+  function getPos(def) {
+    if (!Array.isArray(def.position)) def.position = [0, 0, 0];
+    return def.position;
+  }
+
+  function resetPosition() {
+    if (!ready()) return;
+    const def = geofs.camera.currentDefinition;
+    const orig = originals.get(def);
+    if (orig) {
+      const p = getPos(def);
+      p[0] = orig[0]; p[1] = orig[1]; p[2] = orig[2];
+    }
+    // also snap the view back to straight ahead
+    const o = def.orientations;
+    if (o && o.current) {
+      const n = o.neutral || [0, 0, 0];
+      o.current[0] = n[0] || 0; o.current[1] = n[1] || 0; o.current[2] = n[2] || 0;
+    }
+  }
+
+  function loop(now) {
+    const dt = Math.min((now - last) / 1000, 0.1);
+    last = now;
+
+    if (ready() && shift) {
+      let strafe = 0, fwd = 0, vert = 0;
+      if (held.ArrowRight) strafe += 1;
+      if (held.ArrowLeft)  strafe -= 1;
+      if (held.ArrowUp)    fwd += 1;
+      if (held.ArrowDown)  fwd -= 1;
+      if (held.PageUp || held.KeyE) vert += 1;
+      if (held.PageDown || held.KeyQ) vert -= 1;
+      if (INVERT_STRAFE) strafe = -strafe;
+      if (INVERT_FWD) fwd = -fwd;
+      if (INVERT_VERT) vert = -vert;
+
+      if (strafe || fwd || vert) {
+        const def = geofs.camera.currentDefinition;
+        const pos = getPos(def);
+        if (!originals.has(def)) originals.set(def, pos.slice());
+
+        // yaw of the view relative to the aircraft (degrees -> radians)
+        let yaw = 0;
+        if (FOLLOW_LOOK && def.orientations && def.orientations.current) {
+          yaw = (def.orientations.current[0] || 0) * Math.PI / 180;
+        }
+        const step = SPEED * (ctrl ? FAST_MULT : 1) * dt;
+        const s = Math.sin(yaw), c = Math.cos(yaw);
+
+        // aircraft frame: x = right, y = forward, z = up
+        pos[0] += (strafe * c + fwd * s) * step;
+        pos[1] += (fwd * c - strafe * s) * step;
+        pos[2] += vert * step;
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  console.log('[Shift Move] Shift+Arrows = walk, Shift+E/Q = up/down, Shift+R (or Home) = reset, +Ctrl = faster.');
+})();
