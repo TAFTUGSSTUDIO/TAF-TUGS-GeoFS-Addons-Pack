@@ -1,0 +1,725 @@
+// ==UserScript==
+// @name         GeoFS Screenshot (Normal + 360 + 360 Video)
+// @namespace    geofs-screenshot
+// @version      1
+// @description  Normal screenshot, 360° panorama, and 360° timelapse video frames (saved as ZIP for ffmpeg)
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://*.geo-fs.com/geofs.php*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ---- Settings you can tweak ----
+  const CFG = {
+    // Stills and the first video frame (slow, thorough loading)
+    warmupMs: 2500,        // per-face warm-up time
+    faceWaitMs: 5000,      // minimum wait per face before capturing (keeps rendering so tiles load)
+    settleMs: 6000,        // max wait per face before capturing (raised automatically if lower than faceWaitMs)
+    stableFrames: 4,       // frames in a row with everything loaded
+
+    // Video frames after the first one (faster, since things are already loaded)
+    videoSettleMs: 1500,
+    videoStableFrames: 2,
+
+    jpegQuality: 0.9,
+
+    // Lighting fix for 360 captures: models (basket, balloon, aircraft) can come out
+    // nearly black when the sim sun is below/behind them. This swaps in an even
+    // overhead light while capturing. Set flatLighting to false to disable.
+    flatLighting: false,   // didn't fix black models in testing, so off by default
+    lightIntensity: 2.5,   // raise if models are still too dark, lower if washed out
+
+    // Hide your own aircraft/basket during 360 capture (clean world panorama).
+    // Hides any 3D model whose centre is within hideRadius metres of the camera.
+    // Can also be toggled from the menu.
+    hideAircraft: true,
+    hideRadius: 60,
+
+    // Treat canvas colours as premultiplied by alpha when blending the sky behind
+    // semi-transparent pixels. Aimed at the dark band along the horizon.
+    // Can also be toggled from the menu.
+    alphaFix: true,
+    framesPerZip: 150,     // a ZIP is saved every N frames to keep memory down
+    maxFrames: 1000,       // hard stop
+  };
+
+  function ready(cb) {
+    const t = setInterval(() => {
+      if (window.geofs && geofs.api && geofs.api.viewer && window.Cesium) {
+        clearInterval(t);
+        cb();
+      }
+    }, 1000);
+  }
+
+  function download(url, name) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    download(url, name);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  function stamp() {
+    return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  }
+
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+  const toBlobP = (canvas, type, q) =>
+    new Promise((res) => canvas.toBlob(res, type, q));
+
+  // ---------- Sky helpers ----------
+
+  function forceSky(scene) {
+    const saved = [];
+    const set = (obj, key, val) => {
+      if (obj && key in obj) {
+        saved.push([obj, key, obj[key]]);
+        obj[key] = val;
+      }
+    };
+    if (scene.skyBox) set(scene.skyBox, 'show', true);
+    if (scene.skyAtmosphere) set(scene.skyAtmosphere, 'show', true);
+    if (scene.sun) set(scene.sun, 'show', true);
+    if (scene.moon) set(scene.moon, 'show', true);
+    if (scene.globe) set(scene.globe, 'showGroundAtmosphere', true);
+    return () => saved.forEach(([o, k, v]) => { try { o[k] = v; } catch (e) {} });
+  }
+
+  function fallbackColor(dU) {
+    if (dU >= 0) {
+      const t = Math.min(1, dU * 1.3);
+      return [190 + (90 - 190) * t, 215 + (150 - 215) * t, 240 + (220 - 240) * t];
+    }
+    return [105, 115, 105];
+  }
+
+  // ---------- Works in any camera mode (cockpit, chase, free) ----------
+
+  // Pause the flight sim while capturing so the aircraft doesn't move between views.
+  // Returns a function that resumes (only if we were the ones who paused).
+  function pauseSim() {
+    try {
+      let paused = typeof geofs.isPaused === 'function' ? geofs.isPaused() : !!geofs.isPaused;
+      if (!paused && typeof geofs.pause === 'function') {
+        geofs.pause();
+        return () => {
+          try {
+            if (typeof geofs.unpause === 'function') geofs.unpause();
+            else if (typeof geofs.togglePause === 'function') geofs.togglePause();
+          } catch (e) {}
+        };
+      }
+    } catch (e) {
+      console.warn('Could not pause GeoFS', e);
+    }
+    return () => {};
+  }
+
+  // Stop GeoFS from moving the camera while we capture. We (1) disable its camera
+  // update function and (2) re-apply our own view at the start of every Cesium frame.
+  function lockCamera(scene, getApply) {
+    let origUpdate = null;
+    const cams = window.geofs && geofs.camera;
+    if (cams && typeof cams.update === 'function') {
+      origUpdate = cams.update;
+      cams.update = function () {};
+    }
+    const onPre = () => { try { getApply()(); } catch (e) {} };
+    scene.preUpdate.addEventListener(onPre);
+    return () => {
+      scene.preUpdate.removeEventListener(onPre);
+      if (origUpdate) cams.update = origUpdate;
+    };
+  }
+
+  // Even overhead lighting + no sun-dependent atmosphere darkening, restored afterwards.
+  function flatLight(scene, cam) {
+    const restores = [];
+    const set = (obj, key, val) => {
+      if (obj && key in obj) {
+        const old = obj[key];
+        try { obj[key] = val; restores.push(() => { try { obj[key] = old; } catch (e) {} }); } catch (e) {}
+      }
+    };
+    try {
+      // Light shining straight down from above the camera
+      const down = Cesium.Cartesian3.negate(
+        Cesium.Cartesian3.normalize(cam.positionWC, new Cesium.Cartesian3()),
+        new Cesium.Cartesian3()
+      );
+      set(scene, 'light', new Cesium.DirectionalLight({
+        direction: down,
+        color: Cesium.Color.WHITE,
+        intensity: CFG.lightIntensity,
+      }));
+    } catch (e) {
+      console.warn('Could not set flat light', e);
+    }
+    // Stop the atmosphere/horizon from darkening based on the sun position
+    try {
+      if (scene.atmosphere && Cesium.DynamicAtmosphereLightingType) {
+        set(scene.atmosphere, 'dynamicLighting', Cesium.DynamicAtmosphereLightingType.NONE);
+      }
+      if (scene.globe) set(scene.globe, 'dynamicAtmosphereLighting', false);
+    } catch (e) {}
+    return () => restores.forEach((fn) => fn());
+  }
+
+  // Temporarily hide 3D models close to the camera (your own aircraft, basket, cockpit).
+  function hideNearbyModels(scene, cam) {
+    const hidden = [];
+    const camPos = cam.positionWC.clone();
+    const visit = (coll, depth) => {
+      if (!coll || depth > 6) return;
+      const list = coll._primitives || [];
+      for (const p of list) {
+        try {
+          if (Cesium.PrimitiveCollection && p instanceof Cesium.PrimitiveCollection) {
+            visit(p, depth + 1);
+          } else if (Cesium.Model && p instanceof Cesium.Model && p.show) {
+            const bs = p.boundingSphere;
+            if (bs && bs.radius < 200 &&
+                Cesium.Cartesian3.distance(bs.center, camPos) < CFG.hideRadius) {
+              p.show = false;
+              hidden.push(p);
+            }
+          }
+        } catch (e) {}
+      }
+    };
+    visit(scene.primitives, 0);
+    return () => hidden.forEach((p) => { try { p.show = true; } catch (e) {} });
+  }
+
+  // ---------- Normal screenshot ----------
+
+  function normalShot() {
+    const viewer = geofs.api.viewer;
+    const scene = viewer.scene;
+    const restore = forceSky(scene);
+    scene.render();
+    const src = scene.canvas;
+
+    const out = document.createElement('canvas');
+    out.width = src.width; out.height = src.height;
+    const ctx = out.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, out.height);
+    g.addColorStop(0, 'rgb(90,150,220)');
+    g.addColorStop(0.6, 'rgb(190,215,240)');
+    g.addColorStop(1, 'rgb(150,160,150)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(src, 0, 0);
+    restore();
+
+    out.toBlob((blob) => downloadBlob(blob, `geofs-${stamp()}.png`), 'image/png');
+  }
+
+  // ---------- 360 core ----------
+
+  // Render until terrain/imagery has finished loading (or timeout)
+  async function settle(scene, applyView, maxMs, stableNeeded, minMs = 0) {
+    const t0 = performance.now();
+    const limit = Math.max(maxMs, minMs);
+    let stable = 0;
+    while (performance.now() - t0 < limit) {
+      applyView();
+      scene.render();
+      await nextFrame();
+      const loaded = !scene.globe || scene.globe.tilesLoaded;
+      stable = loaded ? stable + 1 : 0;
+      if (stable >= stableNeeded && performance.now() - t0 >= minMs) break;
+    }
+    applyView();
+    scene.render();
+  }
+
+  // Cube faces relative to the starting heading (right, forward, up vectors)
+  function faceBasis() {
+    const P = Math.PI / 2;
+    const faces = [];
+    for (let k = 0; k < 4; k++) {
+      const a = k * P;
+      faces.push({
+        yaw: a, pitch: 0,
+        r: [Math.cos(a), -Math.sin(a), 0],
+        f: [Math.sin(a), Math.cos(a), 0],
+        u: [0, 0, 1],
+      });
+    }
+    const eps = 0.0017;
+    faces.push({ yaw: 0, pitch: P - eps, r: [1, 0, 0], f: [0, 0, 1], u: [0, -1, 0] });
+    faces.push({ yaw: 0, pitch: -(P - eps), r: [1, 0, 0], f: [0, 0, -1], u: [0, 1, 0] });
+    return faces;
+  }
+
+  // The pixel mapping (equirect -> cube face pixel) is the same every frame,
+  // so build it once per resolution. This makes later frames much faster.
+  let cache = null;
+
+  async function ensureCache(S, setStatus) {
+    if (cache && cache.S === S) return cache;
+    setStatus('Preparing stitch map…');
+    await wait(20);
+    const W = S * 4, H = S * 2;
+    const faceIdx = new Uint8Array(W * H);
+    const srcIdx = new Uint32Array(W * H);
+    const faces = faceBasis();
+
+    const sinLon = new Float32Array(W), cosLon = new Float32Array(W);
+    for (let x = 0; x < W; x++) {
+      const lon = ((x + 0.5) / W - 0.5) * 2 * Math.PI;
+      sinLon[x] = Math.sin(lon); cosLon[x] = Math.cos(lon);
+    }
+
+    for (let y = 0; y < H; y++) {
+      const lat = (0.5 - (y + 0.5) / H) * Math.PI;
+      const cl = Math.cos(lat), dz = Math.sin(lat);
+      for (let x = 0; x < W; x++) {
+        const dx = cl * sinLon[x], dy = cl * cosLon[x];
+
+        let best = 0, bz = -2;
+        for (let i = 0; i < 6; i++) {
+          const f = faces[i].f;
+          const z = dx * f[0] + dy * f[1] + dz * f[2];
+          if (z > bz) { bz = z; best = i; }
+        }
+        const F = faces[best];
+        const px = dx * F.r[0] + dy * F.r[1] + dz * F.r[2];
+        const py = dx * F.u[0] + dy * F.u[1] + dz * F.u[2];
+        let u = Math.floor(((px / bz + 1) / 2) * S);
+        let v = Math.floor(((1 - py / bz) / 2) * S);
+        u = u < 0 ? 0 : u >= S ? S - 1 : u;
+        v = v < 0 ? 0 : v >= S ? S - 1 : v;
+        const i = y * W + x;
+        faceIdx[i] = best;
+        srcIdx[i] = v * S + u;
+      }
+      if (y % 128 === 0) await wait(0);
+    }
+
+    const out = document.createElement('canvas');
+    out.width = W; out.height = H;
+    const octx = out.getContext('2d');
+    cache = { S, W, H, faceIdx, srcIdx, out, octx, img: octx.createImageData(W, H) };
+    return cache;
+  }
+
+  /**
+   * Capture one full 360° frame and return the (reused) output canvas.
+   * opts: { warmup, settleMs, stable, label }
+   */
+  async function capture360(setStatus, opts) {
+    const viewer = geofs.api.viewer;
+    const scene = viewer.scene;
+    const cam = viewer.camera;
+    const canvas = scene.canvas;
+    const w = canvas.width, h = canvas.height;
+    const S = Math.min(w, h);
+
+    const C = await ensureCache(S, setStatus);
+
+    const saved = {
+      pos: cam.position.clone(),
+      heading: cam.heading,
+      pitch: cam.pitch,
+      roll: cam.roll,
+      fov: cam.frustum.fov,
+    };
+    const h0 = saved.heading;
+    const restoreSky = forceSky(scene);
+    let curApply = () => {};
+    const unpause = pauseSim();
+    const unlock = lockCamera(scene, () => curApply);
+    const restoreLight = CFG.flatLighting ? flatLight(scene, cam) : () => {};
+    const restoreModels = CFG.hideAircraft ? hideNearbyModels(scene, cam) : () => {};
+
+    // Make the centre square of the canvas exactly 90° x 90°
+    cam.frustum.fov = 2 * Math.atan(Math.max(w, h) / S);
+
+    const faces = faceBasis();
+    const viewFor = (f) => () =>
+      cam.setView({
+        destination: saved.pos,
+        orientation: { heading: h0 + f.yaw, pitch: f.pitch, roll: 0 },
+      });
+
+    const tmp = document.createElement('canvas');
+    tmp.width = S; tmp.height = S;
+    const tctx = tmp.getContext('2d', { willReadFrequently: true });
+    const tag = opts.label ? opts.label + ' ' : '';
+
+    try {
+      if (opts.warmup) {
+        for (let i = 0; i < 6; i++) {
+          setStatus(`${tag}Loading view ${i + 1}/6…`);
+          curApply = viewFor(faces[i]);
+          await settle(scene, curApply, CFG.warmupMs, 1);
+        }
+      }
+      for (let i = 0; i < 6; i++) {
+        const f = faces[i];
+        const apply = viewFor(f);
+        curApply = apply;
+        setStatus(`${tag}Capturing view ${i + 1}/6…`);
+        await settle(scene, apply, opts.settleMs, opts.stable, CFG.faceWaitMs);
+
+        apply();
+        scene.render();
+        if (Math.abs(cam.pitch - f.pitch) > 0.05) {
+          throw new Error(
+            'GeoFS is overriding the camera in this view mode, so the 360° capture would be wrong. ' +
+            'Try a different camera mode and tell me which one this was.'
+          );
+        }
+        tctx.clearRect(0, 0, S, S);
+        tctx.drawImage(canvas, (w - S) / 2, (h - S) / 2, S, S, 0, 0, S, S);
+        f.data = tctx.getImageData(0, 0, S, S).data;
+      }
+    } finally {
+      unlock();
+      restoreModels();
+      restoreLight();
+      restoreSky();
+      cam.frustum.fov = saved.fov;
+      cam.setView({
+        destination: saved.pos,
+        orientation: { heading: saved.heading, pitch: saved.pitch, roll: saved.roll },
+      });
+      unpause();
+    }
+
+    // Stitch using the cached map
+    setStatus(`${tag}Stitching…`);
+    await wait(0);
+    const { W, H, faceIdx, srcIdx, octx, img, out } = C;
+    const od = img.data;
+    const fdata = faces.map((f) => f.data);
+
+    for (let y = 0; y < H; y++) {
+      const lat = (0.5 - (y + 0.5) / H) * Math.PI;
+      const fb = fallbackColor(Math.sin(lat));
+      const row = y * W;
+      for (let x = 0; x < W; x++) {
+        const i = row + x;
+        const d = fdata[faceIdx[i]];
+        const si = srcIdx[i] * 4;
+        const di = i * 4;
+        const a = d[si + 3];
+        if (a === 255) {
+          od[di] = d[si]; od[di + 1] = d[si + 1]; od[di + 2] = d[si + 2];
+        } else {
+          const t = a / 255;
+          if (CFG.alphaFix) {
+            // colours already multiplied by alpha: add the sky behind (clamped by ImageData)
+            od[di]     = d[si]     + fb[0] * (1 - t);
+            od[di + 1] = d[si + 1] + fb[1] * (1 - t);
+            od[di + 2] = d[si + 2] + fb[2] * (1 - t);
+          } else {
+            od[di]     = d[si]     * t + fb[0] * (1 - t);
+            od[di + 1] = d[si + 1] * t + fb[1] * (1 - t);
+            od[di + 2] = d[si + 2] * t + fb[2] * (1 - t);
+          }
+        }
+        od[di + 3] = 255;
+      }
+      if (y % 256 === 0) await wait(0);
+    }
+    octx.putImageData(img, 0, 0);
+    return out;
+  }
+
+  // ---------- 360 still ----------
+
+  async function panoShot(setStatus) {
+    const out = await capture360(setStatus, {
+      warmup: true, settleMs: CFG.settleMs, stable: CFG.stableFrames,
+    });
+    const blob = await toBlobP(out, 'image/jpeg', 0.92);
+    downloadBlob(blob, `geofs-360-${stamp()}.jpg`);
+  }
+
+  // ---------- Minimal ZIP writer (no compression; JPEGs are already compressed) ----------
+
+  const CRC_T = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+
+  function crc32(buf) {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = CRC_T[(c ^ buf[i]) & 255] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+
+  // files: [{ name, blob }]
+  async function makeZip(files) {
+    const enc = new TextEncoder();
+    const d = new Date();
+    const dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    const dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+
+    const parts = [], central = [];
+    let offset = 0;
+
+    for (const f of files) {
+      const data = new Uint8Array(await f.blob.arrayBuffer());
+      const crc = crc32(data);
+      const name = enc.encode(f.name);
+
+      const lh = new Uint8Array(30 + name.length);
+      const lv = new DataView(lh.buffer);
+      lv.setUint32(0, 0x04034b50, true);
+      lv.setUint16(4, 20, true);
+      lv.setUint16(6, 0x0800, true);
+      lv.setUint16(8, 0, true);
+      lv.setUint16(10, dosTime, true);
+      lv.setUint16(12, dosDate, true);
+      lv.setUint32(14, crc, true);
+      lv.setUint32(18, data.length, true);
+      lv.setUint32(22, data.length, true);
+      lv.setUint16(26, name.length, true);
+      lv.setUint16(28, 0, true);
+      lh.set(name, 30);
+
+      const ch = new Uint8Array(46 + name.length);
+      const cv = new DataView(ch.buffer);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0x0800, true);
+      cv.setUint16(10, 0, true);
+      cv.setUint16(12, dosTime, true);
+      cv.setUint16(14, dosDate, true);
+      cv.setUint32(16, crc, true);
+      cv.setUint32(20, data.length, true);
+      cv.setUint32(24, data.length, true);
+      cv.setUint16(28, name.length, true);
+      cv.setUint32(42, offset, true);
+      ch.set(name, 46);
+
+      parts.push(lh, f.blob); // keep the Blob itself to avoid duplicating memory
+      central.push(ch);
+      offset += lh.length + data.length;
+    }
+
+    const cdSize = central.reduce((s, c) => s + c.length, 0);
+    const end = new Uint8Array(22);
+    const ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, files.length, true);
+    ev.setUint16(10, files.length, true);
+    ev.setUint32(12, cdSize, true);
+    ev.setUint32(16, offset, true);
+
+    return new Blob([...parts, ...central, end], { type: 'application/zip' });
+  }
+
+  // ---------- 360 video (timelapse frames) ----------
+
+  async function videoRecord(setStatus, intervalSec, stopFlag) {
+    const sessionId = stamp();
+    let frames = [];     // frames waiting to be zipped
+    let total = 0;       // frames captured overall
+    let part = 1;
+
+    const flush = async () => {
+      if (!frames.length) return;
+      setStatus(`Zipping part ${part}…`);
+      const files = frames.slice();
+      if (part === 1) {
+        const readme =
+          `GeoFS 360 video frames\n` +
+          `Interval between frames: ${intervalSec}s (real time)\n\n` +
+          `Extract ALL zip parts into the same folder, then run:\n\n` +
+          `ffmpeg -framerate 30 -i frame_%04d.jpg -c:v libx264 -crf 18 -pix_fmt yuv420p out.mp4\n\n` +
+          `Playback speed = 30 x ${intervalSec} = ${30 * intervalSec}x real time at 30 fps.\n` +
+          `For a different speed change -framerate (e.g. 15).\n\n` +
+          `For YouTube/VR, inject 360 metadata with Google's "Spatial Media Metadata Injector".\n`;
+        files.unshift({ name: 'README.txt', blob: new Blob([readme], { type: 'text/plain' }) });
+      }
+      const zip = await makeZip(files);
+      downloadBlob(zip, `geofs-360-video-${sessionId}-part${part}.zip`);
+      part++;
+      frames = [];
+      await wait(500);
+    };
+
+    while (!stopFlag.v && total < CFG.maxFrames) {
+      const t0 = performance.now();
+      const first = total === 0;
+      const out = await capture360(setStatus, {
+        warmup: first,
+        settleMs: first ? CFG.settleMs : CFG.videoSettleMs,
+        stable: first ? CFG.stableFrames : CFG.videoStableFrames,
+        label: `Frame ${total + 1}:`,
+      });
+      const blob = await toBlobP(out, 'image/jpeg', CFG.jpegQuality);
+      total++;
+      frames.push({ name: `frame_${String(total).padStart(4, '0')}.jpg`, blob });
+
+      if (frames.length >= CFG.framesPerZip) await flush();
+
+      // Wait out the rest of the interval (sim runs normally meanwhile)
+      while (!stopFlag.v && performance.now() - t0 < intervalSec * 1000) {
+        const left = Math.ceil((intervalSec * 1000 - (performance.now() - t0)) / 1000);
+        setStatus(`${total} frames • next in ${left}s`);
+        await wait(200);
+      }
+    }
+
+    await flush();
+    setStatus(`Done: ${total} frames`);
+    await wait(2500);
+  }
+
+  // ---------- UI ----------
+
+  function buildUI() {
+    const wrap = document.createElement('div');
+    wrap.style.cssText =
+      'position:fixed;top:60px;left:10px;z-index:99999;font:13px sans-serif;user-select:none;';
+
+    const btn = document.createElement('button');
+    btn.textContent = '📷';
+    btn.title = 'Screenshot';
+    btn.style.cssText =
+      'width:38px;height:38px;border-radius:8px;border:1px solid #555;background:#222c;color:#fff;font-size:18px;cursor:pointer;';
+
+    const menu = document.createElement('div');
+    menu.style.cssText =
+      'display:none;margin-top:4px;background:#222e;border:1px solid #555;border-radius:8px;overflow:hidden;';
+
+    const status = document.createElement('div');
+    status.style.cssText =
+      'display:none;margin-top:4px;padding:4px 8px;background:#222e;color:#fff;border-radius:6px;white-space:nowrap;';
+
+    const stopBtn = document.createElement('div');
+    stopBtn.textContent = '⏹ Stop & save';
+    stopBtn.style.cssText =
+      'display:none;margin-top:4px;padding:6px 10px;background:#a22e;color:#fff;border-radius:6px;cursor:pointer;white-space:nowrap;';
+
+    function item(label, fn) {
+      const b = document.createElement('div');
+      b.textContent = label;
+      b.style.cssText = 'padding:8px 14px;color:#fff;cursor:pointer;white-space:nowrap;';
+      b.onmouseenter = () => (b.style.background = '#444');
+      b.onmouseleave = () => (b.style.background = '');
+      b.onclick = fn;
+      return b;
+    }
+
+    const setStatus = (t) => {
+      status.textContent = t;
+      status.style.display = t ? 'block' : 'none';
+    };
+
+    let busy = false;
+    const stopFlag = { v: false };
+    stopBtn.onclick = () => { stopFlag.v = true; stopBtn.textContent = 'Stopping…'; };
+
+    menu.appendChild(item('Normal', () => {
+      menu.style.display = 'none';
+      normalShot();
+    }));
+
+    menu.appendChild(item('360°', async () => {
+      menu.style.display = 'none';
+      if (busy) return;
+      busy = true;
+      try {
+        await panoShot(setStatus);
+      } catch (e) {
+        console.error('360 screenshot failed', e);
+        alert('360 screenshot failed: ' + e.message);
+      }
+      busy = false;
+      setStatus('');
+    }));
+
+    menu.appendChild(item('360° Video…', async () => {
+      menu.style.display = 'none';
+      if (busy) return;
+      const ans = prompt(
+        'Seconds between 360° frames?\n' +
+        '(Each frame takes a few seconds to capture; the screen will flicker through the views. ' +
+        'Keep this tab visible.)',
+        '3'
+      );
+      if (ans === null) return;
+      const sec = Math.max(1, parseFloat(ans) || 3);
+
+      busy = true;
+      stopFlag.v = false;
+      stopBtn.textContent = '⏹ Stop & save';
+      stopBtn.style.display = 'block';
+      try {
+        await videoRecord(setStatus, sec, stopFlag);
+      } catch (e) {
+        console.error('360 video failed', e);
+        alert('360 video failed: ' + e.message);
+      }
+      stopBtn.style.display = 'none';
+      busy = false;
+      setStatus('');
+    }));
+
+    const hideItem = item('', () => { CFG.hideAircraft = !CFG.hideAircraft; refreshToggles(); });
+    const alphaItem = item('', () => { CFG.alphaFix = !CFG.alphaFix; refreshToggles(); });
+    function refreshToggles() {
+      hideItem.textContent = `Hide aircraft: ${CFG.hideAircraft ? 'ON' : 'OFF'}`;
+      alphaItem.textContent = `Alpha fix: ${CFG.alphaFix ? 'ON' : 'OFF'}`;
+    }
+    refreshToggles();
+    menu.appendChild(hideItem);
+    menu.appendChild(alphaItem);
+
+    menu.appendChild(item('Debug info', () => {
+      menu.style.display = 'none';
+      try {
+        const scene = geofs.api.viewer.scene;
+        const gl = scene.context && scene.context._gl;
+        const attrs = gl && gl.getContextAttributes ? gl.getContextAttributes() : null;
+        const info = {
+          cesium: Cesium.VERSION,
+          glAlpha: attrs && attrs.alpha,
+          glPremultiplied: attrs && attrs.premultipliedAlpha,
+          light: scene.light && scene.light.constructor && scene.light.constructor.name,
+          lightIntensity: scene.light && scene.light.intensity,
+          hdr: scene.highDynamicRange,
+          globeLighting: scene.globe && scene.globe.enableLighting,
+          fxaa: scene.postProcessStages && scene.postProcessStages.fxaa && scene.postProcessStages.fxaa.enabled,
+          bg: scene.backgroundColor && scene.backgroundColor.toCssColorString && scene.backgroundColor.toCssColorString(),
+          cameraMode: window.geofs && geofs.camera && geofs.camera.currentModeName,
+        };
+        console.log('GeoFS screenshot debug', info);
+        prompt('Debug info (copy this and send it to Claude):', JSON.stringify(info));
+      } catch (e) {
+        alert('Debug failed: ' + e.message);
+      }
+    }));
+
+    btn.onclick = () => (menu.style.display = menu.style.display === 'none' ? 'block' : 'none');
+
+    wrap.append(btn, menu, status, stopBtn);
+    document.body.appendChild(wrap);
+  }
+
+  ready(buildUI);
+})();
