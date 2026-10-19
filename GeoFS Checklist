@@ -1,0 +1,1118 @@
+// ==UserScript==
+// @name         GeoFS Checklist
+// @namespace    geofs-plugins
+// @version      1.0
+// @description  Per-aircraft normal and emergency checklists (airliners, bizjets, fighters, props, turboprops, helicopters, gliders, Concorde / Tu-144D, Starship) with realistic flap settings and optional auto-follow.
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://geo-fs.com/geofs.php*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ===== shared mini-library (identical in every GeoFS Companion plugin) =====
+  const M_TO_FT = 3.28084, M_TO_NM = 1 / 1852;
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
+  };
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  function haversineNm(a, b) {
+    const R = 6371000, rad = Math.PI / 180;
+    const dLat = (b[0] - a[0]) * rad, dLon = (b[1] - a[1]) * rad;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h)) * M_TO_NM;
+  }
+  function acName() {
+    try { return geofs.aircraft.instance.aircraftRecord.name || 'Aircraft'; } catch (e) { return 'Aircraft'; }
+  }
+
+  // Floating, draggable, collapsible panel. slot = default column (0 = rightmost)
+  function createPanel(opts) {
+    if (!document.getElementById('gfl-css-' + opts.id)) {
+      const st = document.createElement('style'); st.id = 'gfl-css-' + opts.id;
+      st.textContent = `
+      html[data-gfl-hidden] .gfl-panel{display:none!important}
+      .gfl-panel{position:fixed;width:250px;z-index:99999;font:12px/1.4 system-ui,sans-serif;color:#e5e7eb;
+        background:rgba(15,18,24,.9);border:1px solid #334155;border-radius:10px;backdrop-filter:blur(6px);
+        box-shadow:0 6px 24px rgba(0,0,0,.45);user-select:none}
+      .gfl-hd{padding:7px 10px;cursor:move;display:flex;justify-content:space-between;align-items:center;font-weight:600;letter-spacing:.3px}
+      .gfl-min{cursor:pointer;opacity:.6;padding:0 4px}
+      .gfl-bd{padding:8px 10px;max-height:60vh;overflow-y:auto;border-top:1px solid #334155}
+      .gfl-panel .row{display:flex;justify-content:space-between;align-items:center;padding:1px 0}
+      .gfl-panel .row b{font-variant-numeric:tabular-nums;color:#fff}
+      .gfl-panel .muted{opacity:.6}
+      .gfl-panel button{background:#2563eb;border:0;color:#fff;border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11px;margin:2px 4px 2px 0}
+      .gfl-panel button.g{background:#334155}
+      .gfl-panel label.ck{display:flex;gap:7px;padding:3px 0;cursor:pointer;align-items:flex-start}
+      .gfl-panel label.ck.done span{text-decoration:line-through;opacity:.5}
+      .gfl-panel select{background:#0b0e13;color:#e5e7eb;border:1px solid #334155;border-radius:5px;padding:4px 6px;font-size:12px;max-width:100%}
+      .gfl-panel .fl{margin:4px 0;padding:5px 7px;border-radius:6px;background:rgba(255,255,255,.06);border-left:3px solid #2563eb;font-size:11px}
+      .gfl-panel .fl b{color:#fff}`;
+      document.head.appendChild(st);
+    }
+    const el = document.createElement('div');
+    el.className = 'gfl-panel'; el.id = 'gfl-' + opts.id; el.style.width = (opts.width || 250) + 'px';
+    el.innerHTML = `<div class="gfl-hd"><span>${opts.title}</span><span class="gfl-min" title="Collapse / expand">–</span></div><div class="gfl-bd"></div>`;
+    document.body.appendChild(el);
+    const hd = el.querySelector('.gfl-hd'), body = el.querySelector('.gfl-bd'), minBtn = el.querySelector('.gfl-min');
+
+    const pos = LS.get('gfl_pos_' + opts.id, null);
+    if (pos) { el.style.left = clamp(pos.left, 0, innerWidth - 60) + 'px'; el.style.top = clamp(pos.top, 0, innerHeight - 30) + 'px'; }
+    else { el.style.top = '80px'; el.style.right = (12 + (opts.slot || 0) * 310) + 'px'; }
+
+    const setMin = m => { body.style.display = m ? 'none' : ''; minBtn.textContent = m ? '+' : '–'; LS.set('gfl_min_' + opts.id, m); };
+    setMin(!!LS.get('gfl_min_' + opts.id, false));
+    minBtn.onclick = () => setMin(body.style.display !== 'none');
+
+    let drag = false, ox = 0, oy = 0;
+    hd.addEventListener('mousedown', e => { if (e.target === minBtn) return; drag = true; ox = e.clientX - el.offsetLeft; oy = e.clientY - el.offsetTop; });
+    window.addEventListener('mouseup', () => { if (drag) { drag = false; LS.set('gfl_pos_' + opts.id, { left: el.offsetLeft, top: el.offsetTop }); } });
+    window.addEventListener('mousemove', e => {
+      if (!drag) return;
+      el.style.left = (e.clientX - ox) + 'px'; el.style.top = (e.clientY - oy) + 'px'; el.style.right = 'auto';
+    });
+    ['keydown', 'keyup', 'keypress'].forEach(ev =>
+      el.addEventListener(ev, e => { if (e.target.tagName === 'INPUT') e.stopPropagation(); }));
+    window.addEventListener('keydown', e => {
+      if (e.altKey && e.key.toLowerCase() === 'h' && !e.__gflHandled) {
+        e.__gflHandled = true; document.documentElement.toggleAttribute('data-gfl-hidden');
+      }
+    });
+    return { el, body, $: id => el.querySelector('#' + id) };
+  }
+
+  // Reads GeoFS ~10x/s and calls onTick every frame and onTouchdown on a real landing
+  function createTracker(onTick, onTouchdown) {
+    const T = { last: null, vs: 0, gs: 0, prevVs: 0, prevGs: 0, wasGround: true, wasHigh: false, airSec: 0 };
+    function tick() {
+      const inst = window.geofs && geofs.aircraft && geofs.aircraft.instance;
+      if (!inst || !inst.llaLocation) return;
+      if (typeof geofs.isPaused === 'function' && geofs.isPaused()) return;
+      const lla = inst.llaLocation.slice(0, 3);
+      const now = performance.now() / 1000;
+      const av = (geofs.animation && geofs.animation.values) || {};
+      const hagl = typeof av.haglFeet === 'number' ? av.haglFeet : null;
+      const onGround = !!inst.groundContact || (hagl !== null && hagl < 2);
+      if (!onGround && (hagl === null ? T.airSec > 15 : hagl > 50)) T.wasHigh = true;
+      let dt = 0, dNm = 0, gsInst = 0;
+      if (T.last) {
+        const d = now - T.last.t;
+        if (d > 0 && d < 1) {
+          const nm = haversineNm(T.last.lla, lla), g = (nm * 3600) / d;
+          if (g < 3000) {
+            dt = d; dNm = nm; gsInst = g;
+            const vsInst = ((lla[2] - T.last.lla[2]) * M_TO_FT * 60) / d;
+            T.gs = T.gs * 0.8 + g * 0.2; T.vs = T.vs * 0.8 + vsInst * 0.2;
+            if (!onGround) T.airSec += d;
+          }
+        }
+      }
+      onTick({ T, lla, dt, dNm, gsInst, onGround, av });
+      if (!T.wasGround && onGround && T.wasHigh) {
+        onTouchdown({ vs: Math.max(0, -T.prevVs), gs: T.prevGs });
+        T.wasHigh = false;
+      }
+      if (!onGround) { T.prevVs = T.vs; T.prevGs = T.gs; }
+      T.wasGround = onGround; T.last = { lla, t: now };
+    }
+    setInterval(() => { try { tick(); } catch (e) { /* GeoFS not ready yet */ } }, 100);
+    return T;
+  }
+  // ===== end shared library =====
+
+  const p = createPanel({ id: 'checklist', title: '☑ Checklist', slot: 2, width: 310 });
+  const $ = p.$;
+
+  // =====================================================================
+  //  AIRCRAFT TYPES
+  //  A airliner jet · B business jet · F fighter / military jet · T turboprop
+  //  P piston prop · E electric · H helicopter · G glider · M motor-glider
+  //  C Concorde · U Tu-144D · S Starship · N no checklist (balloon, paraglider ...)
+  // =====================================================================
+  const TYPE_LABEL = {
+    A: 'Airliner / heavy jet', B: 'Business jet', F: 'Fighter / military jet', T: 'Turboprop',
+    P: 'Piston prop', E: 'Electric aircraft', H: 'Helicopter', G: 'Glider', M: 'Motor-glider',
+    C: 'Concorde', U: 'Tu-144D', S: 'Starship (rocket hop)', N: 'No checklist'
+  };
+
+  // first match wins (names are lower-cased)
+  const DETECT = [
+    ['N', /balloon|major tom|goat|airchair|paraglid|paramotor|wingsuit|citro[eë]n|2cv|hang ?glider/],
+    ['S', /starship|\bsn\d/],
+    ['C', /concorde/],
+    ['U', /tu-?144/],
+    ['M', /silent|alisport/],
+    ['G', /grob|astir|g-?103|glider/],
+    ['H', /eurocopter|ec-?135|as-?365|dauphin|hughes|osage|th-?55|269a|uh-?60|black ?hawk|helicopter/],
+    ['F', /alpha ?jet|f-?16|su-?35|f\/a-?18|super hornet|rafale|t-?38|talon|neuron/],
+    ['E', /\balia\b|beta alia/],
+    ['B', /phenom|challenger|citation|learjet|gulfstream/],
+    ['T', /atr ?42|dhc-?6|twin otter|f-?27|fokker|a400|pc-?7|pc-?12|king ?air|caravan|dash ?8|q400/],
+    ['P', /\bcub\b|cessna|\b172\b|\b152\b|r182|\b337\b|piper|pa-?28|pa-?18|warrior|pitts|beaver|dhc-?2|baron|b55|beechcraft|cri-?cri|colomban|potez|p-?38|lightning|dc-?3\b|il-?14/]
+  ];
+  function detectType(name) {
+    for (const d of DETECT) if (d[1].test(name)) return d[0];
+    return 'A';                        // everything else on the list is a jet airliner / transport
+  }
+
+  const FIXED_GEAR = /\bcub\b|pa-?18|\b152\b|\b172\b|pa-?28|warrior|beaver|dhc-?2|twin otter|dhc-?6|cri-?cri|colomban|potez|pitts/;
+  const SINGLE_ENGINE = /\bcub\b|pa-?18|\b152\b|\b172\b|r182|pa-?28|warrior|pitts|potez|beaver|dhc-?2|pc-?7|f-?16|neuron|hughes|osage|th-?55|\balia\b/;
+
+  // Flap / configuration settings per aircraft (real-world designations; ≈ = approximate).
+  // to = takeoff, app = approach, ldg = landing.
+  const FLAPS = [
+    [/pa-?18|super cub/,        { to: 'UP (1st notch for short field)', app: '1st–2nd notch', ldg: 'Full flaps' }],
+    [/\bcub\b/,                  { noFlaps: true, note: 'Tailwheel, no flaps. Keep the stick back while taxiing.' }],
+    [/\b172\b/,                  { to: 'UP (10° short field)', app: '10°', ldg: '30° (20° in crosswind)' }],
+    [/\b152\b/,                  { to: 'UP (10° short field)', app: '10°', ldg: '30° (20° in crosswind)' }],
+    [/r182/,                     { to: '10°', app: '10–20°', ldg: '30°' }],
+    [/\b337\b/,                  { to: 'UP / first stage (≈10°)', app: 'first stage', ldg: 'Full (≈40°)' }],
+    [/pa-?28|warrior/,           { to: '0° (25° short field)', app: '10–25°', ldg: '40° (25° in crosswind)' }],
+    [/baron|b55/,                { to: 'UP (APPROACH 15° short field)', app: 'APPROACH (15°)', ldg: 'Full DOWN (30°)' }],
+    [/pitts|potez|cri-?cri|colomban/, { noFlaps: true, note: 'No flaps. Tailwheel / light aircraft: stay ahead of the aircraft on landing.' }],
+    [/pc-?7/,                    { to: 'TO', app: 'TO', ldg: 'LDG' }],
+    [/beaver|dhc-?2/,            { to: '≈15° (first stage)', app: '≈20–25°', ldg: 'Full (≈40°)' }],
+    [/twin otter|dhc-?6/,        { to: '10°', app: '20°', ldg: '37° (full)' }],
+    [/dc-?3\b/,                  { to: 'UP (15° short field)', app: '≈1/3 – 1/2', ldg: 'Full DOWN (≈40°)' }],
+    [/p-?38|lightning/,          { to: 'TAKEOFF (≈8°)', app: 'partial', ldg: 'Full DOWN' }],
+    [/il-?14/,                   { to: '≈15–20°', app: '≈25–30°', ldg: '≈40°' }],
+    [/atr ?42/,                  { to: 'Flaps 15', app: 'Flaps 15', ldg: 'Flaps 30' }],
+    [/f-?27|fokker/,             { to: '≈16°', app: '≈24°', ldg: '≈36° (full)' }],
+    [/a400/,                     { to: 'TAKEOFF setting', app: 'APPROACH setting', ldg: 'LANDING (full)' }],
+    [/a320/,                     { to: 'CONF 1+F (CONF 2 short runway)', app: 'CONF 3', ldg: 'CONF FULL (CONF 3 reduced-flap)' }],
+    [/a300/,                     { to: '≈15° (slats + flaps)', app: '≈25°', ldg: 'FULL (≈40°)' }],
+    [/a350|a380/,                { to: 'CONF 1+F (CONF 2 if required)', app: 'CONF 3', ldg: 'CONF FULL (CONF 3 reduced-flap)' }],
+    [/737/,                      { to: 'Flaps 5 (1 or 5 normal, 10/15 short runway)', app: 'Flaps 15', ldg: 'Flaps 30 (40 short field)' }],
+    [/747/,                      { to: 'Flaps 10 (20 heavy / short)', app: 'Flaps 20', ldg: 'Flaps 30 (25 optional)' }],
+    [/777/,                      { to: 'Flaps 5 (15 heavy / short)', app: 'Flaps 20', ldg: 'Flaps 30' }],
+    [/720/,                      { to: 'Flaps 5', app: 'Flaps 15–25', ldg: 'Flaps 30 (40 optional)' }],
+    [/kc-?135/,                  { to: '≈30°', app: '≈40°', ldg: '≈50° (full)' }],
+    [/dc-?10/,                   { to: 'Flaps 15 (slats EXT)', app: 'Flaps 22', ldg: 'Flaps 35 (50 max)' }],
+    [/md-?11/,                   { to: 'Flaps 15–25 (slats EXT)', app: 'Flaps 28', ldg: 'Flaps 35 (50 max)' }],
+    [/e190/,                     { to: 'Flaps 2 (1 or 3 per performance)', app: 'Flaps 3–4', ldg: 'Flaps 5 (FULL short field)' }],
+    [/crj/,                      { to: 'Flaps 8', app: 'Flaps 20', ldg: 'Flaps 45 (30 reduced)' }],
+    [/challenger/,               { to: 'Flaps 20 (10 per performance)', app: 'Flaps 20', ldg: 'Flaps 45' }],
+    [/phenom/,                   { to: 'Flaps 1 (TO)', app: 'Flaps 1–2 (APP)', ldg: 'FULL' }],
+    [/citation/,                 { to: '15°', app: '15°', ldg: '40° (full)' }],
+    [/an-?124/,                  { to: '≈25°', app: '≈30°', ldg: '≈40°' }],
+    [/il-?76/,                   { to: '≈15°', app: '≈30°', ldg: '≈40–45°' }],
+    [/il-?96/,                   { to: 'TAKEOFF detent (≈20–28°)', app: 'APPROACH detent', ldg: 'LANDING (≈40–50°)' }],
+    [/tu-?204/,                  { to: '22°', app: '28°', ldg: '40°' }],
+    [/alpha ?jet/,               { to: 'TO', app: 'TO / LDG', ldg: 'LDG' }],
+    [/f-?16/,                    { to: 'AUTO (LEF/TEF schedule; ALT FLAPS NORM)', app: 'AUTO', ldg: 'AUTO (gear down = landing schedule)' }],
+    [/su-?35/,                   { to: 'AUTO / TO (slats + flaps via flight-control system)', app: 'AUTO', ldg: 'AUTO / LDG' }],
+    [/f\/a-?18|super hornet/,    { to: 'HALF', app: 'HALF / FULL', ldg: 'FULL (AUTO also fine)' }],
+    [/rafale/,                   { to: 'AUTO (flight-control computer)', app: 'AUTO', ldg: 'AUTO' }],
+    [/t-?38|talon/,              { to: 'TO position', app: 'TO / LDG', ldg: 'LDG (full)' }],
+    [/neuron/,                   { noFlaps: true, note: 'Unmanned flying wing, no flaps.' }],
+    [/concorde/,                 { noFlaps: true, note: 'No flaps (elevons). Droop nose + visor: nose 5° down for takeoff, full down (≈12.5°) for taxi / landing, UP and visor UP for flight.' }],
+    [/tu-?144/,                  { noFlaps: true, note: 'No flaps. Droop nose for takeoff / landing and retractable canards (foreplanes) for low speed; drag chute on landing.' }],
+    [/grob|astir|silent|alisport/, { noFlaps: true, note: 'Airbrakes (spoilers) control the glidepath.' }]
+  ];
+  // fallbacks when an aircraft is not in the table
+  const FLAPS_DEFAULT = {
+    A: { to: 'per performance data', app: 'next stage per schedule', ldg: 'landing setting (full or next-to-full)' },
+    B: { to: 'per performance data', app: 'approach setting', ldg: 'landing setting' },
+    F: { to: 'TO / HALF (per aircraft)', app: 'between TO and LDG', ldg: 'LDG / FULL' },
+    T: { to: 'TAKEOFF setting', app: 'APPROACH setting', ldg: 'LANDING setting (full)' },
+    P: { to: '0–10° (10° short field)', app: '10–20°', ldg: '30° / full' },
+    E: { to: 'TAKEOFF setting', app: 'APPROACH setting', ldg: 'LANDING setting' },
+    H: { noFlaps: true }, G: { noFlaps: true }, M: { noFlaps: true },
+    C: { noFlaps: true }, U: { noFlaps: true }, S: { noFlaps: true }, N: { noFlaps: true }
+  };
+
+  // =====================================================================
+  //  ITEM SYNTAX
+  //  [ABF]  = only for these aircraft types (no prefix = all types of this list)
+  //  ~      = only when the aircraft has flaps          ^ = only when gear retracts
+  //  *      = single-engine aircraft only               + = multi-engine only
+  //  {TO} {APP} {LDG} = replaced by this aircraft's flap setting
+  // =====================================================================
+  const NORMAL = [
+    ['Preflight', [
+      'Flight plan filed / route & alternate planned',
+      'Weather checked: wind, visibility, ceiling at departure and destination',
+      '[ABFTPH]Fuel planned and loaded (route + alternate + reserve)',
+      '[E]Battery charge sufficient for route + reserve',
+      'Weight & balance / payload within limits',
+      '[ABFTPE]Runway length vs. takeoff distance checked',
+      'NOTAMs and airport restrictions reviewed',
+      'Altimeter set to QNH',
+      'Parking brake SET',
+      'Flight controls free and correct',
+      'Transponder STBY, squawk code set',
+      'COM / NAV radios set (ATIS, clearance, ground)',
+      '[AB]Battery / external power ON, APU started (if equipped)',
+      '[AB]FMS route entered; V-speeds, flaps and trim computed',
+      '[AB]Seatbelt sign ON',
+      '[F]Battery ON, canopy closed and locked, harness secure',
+      '[F]Ejection seat safety pins removed (seat armed only when instructed)',
+      '[F]Weapons / stores switches SAFE, master arm OFF',
+      '[F]Oxygen and G-suit connected, helmet on',
+      '[T]Battery ON, avionics OFF until after start',
+      '[P]Master switch ON, avionics OFF until after start',
+      '[P]Fuel selector BOTH/ON, quantity checked, fuel drained for water',
+      '[PT]Doors latched, seats and harnesses secured, propeller area clear',
+      '[E]Master ON, avionics OFF until after motor start',
+      '[H]Rotor brake OFF, collective full down, cyclic neutral'
+    ]],
+    ['Before start', [
+      'Parking brake SET',
+      'Beacon / anti-collision light ON',
+      'Throttle / thrust levers IDLE (collective down for helicopters)',
+      'Area around aircraft clear',
+      'Doors and hatches closed',
+      'Start-up / pushback clearance obtained',
+      '[AB]Fuel pumps ON, bleed air configured',
+      '[AB]Cabin ready, seatbelt sign ON',
+      '[T]Power lever IDLE, condition lever FUEL OFF, propeller lever per start procedure',
+      '[P]Mixture RICH, propeller HIGH RPM (if constant-speed), carb heat COLD',
+      '[P]Fuel pump ON, prime engine if cold',
+      '[E]Motor controller armed, throttle ZERO, propeller clear',
+      '[H]Rotor clear of people and obstacles'
+    ]],
+    ['Engine start', [
+      '"Clear!" call made (prop / rotor / engine area)',
+      '[ABFTPH]Engine started and stabilised at idle',
+      '[ABFTPH]Oil pressure rising into the green',
+      '[ABFTPH]Generators / alternators ON, charging',
+      'All engine indications normal, no warnings',
+      '[ABF]Engine start: N2 rising, fuel ON at ~20%, watch EGT',
+      '[AB]Repeat for remaining engines, APU bleed OFF after start',
+      '[T]Starter, condition lever to RUN, watch ITT and Ng; unfeather propeller',
+      '[P]Starter engaged, oil pressure within 30 seconds',
+      '[E]Motor armed, RPM and temperatures normal',
+      '[H]Rotor RPM in the green before increasing power'
+    ]],
+    ['After start', [
+      'Avionics ON; radios and nav set',
+      '~Flaps set for takeoff: {TO}',
+      '[ABFTPE]Trim set for takeoff',
+      'Flight controls full and free',
+      '[ABFTPE]Altimeter, heading indicator, attitude indicator checked',
+      'Transponder set to ALT / ON',
+      'Taxi clearance received',
+      'Taxi light ON',
+      'Parking brake RELEASED',
+      '[AB]Hydraulics normal, anti-ice as required',
+      '[A]Autobrake set to RTO',
+      '[F]Navigation aligned, flight controls reset, no warnings'
+    ]],
+    ['Taxi', [
+      'Brakes checked as soon as moving',
+      '[ABFTPE]Taxi speed: ≤ 20 kt straight, ≤ 10 kt in turns',
+      'Follow assigned taxiways; stop at hold-short lines',
+      '[ABFTPE]Heading indicator and turn coordinator checked in turns',
+      'Watch for traffic and obstacles',
+      '~Takeoff data and flaps ({TO}) re-confirmed',
+      '[PTE]Correct controls for the wind while taxiing (aileron into wind, elevator down in a tailwind)',
+      '[H]Hover-taxi low and slow (walking speed)'
+    ]],
+    ['Before takeoff', [
+      '[ABFTPE]Takeoff briefing: rejected takeoff and engine-failure plan',
+      'Runway and clearance confirmed',
+      '~Flaps {TO}; trim set',
+      'Strobes and landing lights ON',
+      'Transponder ON / ALT',
+      '[ABFTPE]Heading indicator and altimeter match runway',
+      'Doors, hatches and seatbelts secure',
+      '[AB]Initial heading / altitude set on autopilot',
+      '[ABF]Speedbrakes / spoilers retracted',
+      '[AB]TCAS TA/RA, seatbelt sign ON',
+      '[T]Propeller lever HIGH RPM, auto-feather armed, power levers checked',
+      '[P]Run-up: magnetos BOTH / L / R (RPM drop within limits), carb heat, engine instruments',
+      '[P]Fuel selector BOTH, mixture RICH, trim set',
+      '[E]Motor / battery temperatures normal, throttle response checked',
+      '[H]Hover check: power, balance, controls'
+    ]],
+    ['Takeoff & climb-out', [
+      '[ABFTPE]Line up on centreline, nosewheel / tailwheel straight',
+      '[ABFTPE]Set takeoff power / TOGA and check engine instruments',
+      '[ABFTPE]Airspeed alive and cross-checked',
+      '[ABFTPE]Rotate at Vr',
+      '^[ABFTPE]Positive rate: gear UP',
+      '[ABFTPE]Climb at V2 / Vy (best climb speed)',
+      '~Retract flaps on schedule',
+      '[AB]Autopilot ON above ~400 ft AGL',
+      '[AB]Climb thrust set, lateral navigation armed',
+      '[F]Afterburner (if used) OFF at a safe height; accelerate to climb speed',
+      '[T]Torque / ITT within limits, climb power set',
+      '[P]Reduce to climb power, check mixture and cylinder temps',
+      '[E]Reduce to climb power; watch battery and motor temperatures',
+      '[H]Lift to a hover, nose forward, accelerate through ETL (~15–20 kt), climb at Vy'
+    ]],
+    ['Climb', [
+      '[ABFTPE]Altimeter to 1013 / STD at transition altitude',
+      'Climb power / thrust set, monitor engine temperatures',
+      '[AB]Autopilot altitude and speed set',
+      'Cleared altitude confirmed, level off',
+      '[ABFTPE]Passing 10,000 ft: landing lights OFF',
+      '[AB]Seatbelt sign OFF when safe, pressurisation normal',
+      '[P]Lean mixture above ~3,000 ft density altitude'
+    ]],
+    ['Cruise', [
+      '[ABFTPE]Cruise power / Mach set and trimmed',
+      '[H]Cruise power set, torque and temperatures normal',
+      '[ABFTPH]Fuel quantity vs. plan checked',
+      '[E]Battery state of charge vs. plan checked',
+      'Navigation: waypoints and ETA confirmed',
+      'Destination weather and ATIS checked',
+      'Engine instruments normal',
+      'Alternate airport still suitable',
+      '[ABFTPE]Descent planned: ~3 nm per 1,000 ft + 10 nm to slow down',
+      '[AB]Cabin altitude and pressurisation normal',
+      '[P]Mixture leaned, EGT / CHT monitored',
+      '[T]ITT, torque and fuel flow monitored'
+    ]],
+    ['Descent', [
+      'Descent briefing: arrival, approach, runway, minimums, go-around',
+      'ATIS received, QNH set at transition level',
+      '[ABFTPE]Approach speed (Vref) set',
+      '~Flap plan: {APP}, then {LDG}',
+      'Landing lights ON below 10,000 ft',
+      '[AB]Cabin / passengers secured, seatbelt sign ON',
+      '[A]Autobrake set',
+      '[ABF]Speed ≤ 250 kt below 10,000 ft',
+      '[P]Descent power set, avoid sudden power reductions',
+      '[P]Mixture richened as you descend',
+      '[T]Power reduced smoothly; watch torque and propeller RPM',
+      '[H]Avoid vortex ring: keep descent rate low when below ~40 kt'
+    ]],
+    ['Approach', [
+      'Approach loaded and briefed; ILS / localizer frequency and course set',
+      'Cleared for the approach (verify)',
+      '~Flaps {APP} by the final approach fix',
+      'Localizer and glideslope captured',
+      'Missed-approach altitude set',
+      'Minimums (DA / MDA) set',
+      'Stabilised by 1,000 ft (IMC) / 500 ft (VMC)',
+      '[H]Approach angle ~8–10°, airspeed reducing smoothly'
+    ]],
+    ['Before landing', [
+      'Landing clearance received',
+      '^Gear DOWN, three green',
+      '~Flaps {LDG}',
+      'Landing lights ON',
+      '[ABFTPE]Speed Vref (+5 kt), on glidepath, descent ≤ 1,000 fpm',
+      '[AB]Autopilot disconnected by 500 ft (or as required)',
+      '[AB]Spoilers ARMED',
+      '[P]Mixture RICH, propeller HIGH (if constant-speed), carb heat as needed, fuel pump ON',
+      '[T]Propeller HIGH RPM, reverse available',
+      '[H]Landing area clear, wind checked',
+      'Go-around decision made at minimums'
+    ]],
+    ['After landing', [
+      'Runway vacated, clear of hold-short line',
+      '[ABFT]Spoilers retracted, reversers stowed',
+      '~Flaps UP',
+      'Strobes and landing lights OFF',
+      'Transponder STBY',
+      'Contact ground; taxi to parking',
+      '[AB]APU start for taxi-in; check brake temperatures',
+      '[P]Carb heat COLD, trim reset, mixture leaned for taxi',
+      '[T]Condition lever LOW IDLE, propellers to taxi setting'
+    ]],
+    ['Shutdown', [
+      'Parking brake SET',
+      '[ABFTPH]Throttles IDLE; let engines cool 2–3 minutes',
+      '[ABFTPH]Engines shut down (fuel cut-off / mixture idle cut-off)',
+      'Beacon OFF',
+      'Avionics OFF',
+      '[AB]Seatbelt sign OFF, doors',
+      'Aircraft secured',
+      'Flight logged: check your landing score',
+      '[AB]APU OFF, batteries OFF',
+      '[F]Canopy open, ejection seat SAFED (pins in)',
+      '[T]Condition lever FUEL OFF, battery OFF',
+      '[P]Magnetos OFF, master OFF',
+      '[E]Motor disarmed, master OFF, plug in to charge',
+      '[H]Rotor brake ON once the rotor has slowed'
+    ]]
+  ];
+
+  const EMERG = [
+    ['Engine failure – takeoff', [
+      '[ABFTPE]Runway remaining: reject. Throttle IDLE, brakes MAX, stop straight ahead',
+      '[ABFT]+After V1: keep flying; do not reject',
+      '[P]+After rotation: keep flying at Vyse (blue line), do not reject',
+      '*Low altitude: lower the nose, land straight ahead (±30°); no turn-back below ~1,000 ft AGL',
+      '+Pitch for V2 / Vyse, hold the heading',
+      '+Rudder against yaw, bank ~5° towards the good engine',
+      '^[ABFTPE]+Gear UP at positive rate',
+      '+Identify and confirm the failed engine',
+      'Declare PAN-PAN / MAYDAY',
+      '+Climb to a safe altitude, then clean up flaps',
+      'Return or divert to the nearest suitable airport',
+      '[H]Lower the collective immediately, enter autorotation, land straight ahead'
+    ]],
+    ['Engine failure – in flight', [
+      'Fly the aircraft: maintain control, trim for rudder',
+      '[ABFTPE]Best glide / drift-down speed',
+      'Identify cause (fire, low oil, fuel)',
+      'Attempt restart per procedure',
+      'Squawk 7700 and declare PAN-PAN',
+      'Plan the landing; brief the approach',
+      '[P]Fuel selector, mixture RICH, carb heat ON, boost pump ON, magnetos BOTH',
+      '[ABT]+Fuel crossfeed as required, check thrust on the good engine',
+      '[E]Check battery and motor controller; reduce power, find a field',
+      '[H]Lower collective, enter autorotation (~65–80 kt), keep rotor RPM green, flare, level, cushion'
+    ]],
+    ['Engine fire', [
+      'Throttle / thrust lever IDLE',
+      '[ABFT]Fuel shutoff / condition lever feather',
+      '[ABFT]Fire handle pulled / extinguisher discharged',
+      '[P]Mixture IDLE CUT-OFF, fuel selector OFF, magnetos OFF, cabin heat OFF; sideslip away from the flames',
+      '[E]Master / battery OFF, descend and land immediately',
+      '[H]Collective down, enter autorotation, throttle OFF, fuel OFF',
+      'Squawk 7700, declare MAYDAY',
+      'Descend and land as soon as possible',
+      'Prepare for evacuation'
+    ]],
+    ['Rapid decompression', [
+      '[ABFT]Oxygen masks ON',
+      '[ABFT]Emergency descent: thrust IDLE, speedbrakes, descend to 10,000 ft',
+      '[ABFT]Squawk 7700, declare MAYDAY',
+      '[ABFT]Level off at 10,000 ft or the minimum safe altitude',
+      '[ABFT]Land at the nearest suitable airport'
+    ]],
+    ['Electrical failure', [
+      'Check circuit breakers, battery and alternator / generator',
+      'Shed non-essential loads',
+      'Use standby instruments',
+      'Land as soon as practical'
+    ]],
+    ['Hydraulic failure', [
+      '[ABFTH]Identify the affected system',
+      '[ABFTH]Reduce speed, avoid large control inputs',
+      '^[ABFT]Plan for alternate gear / flap extension',
+      '[ABFTH]Declare PAN-PAN, brief a long straight-in approach',
+      '[ABFTH]Expect reduced braking and nosewheel steering'
+    ]],
+    ["Gear won't extend", [
+      '^Go around / level off; recycle the gear',
+      '^Check gear lights and circuit breaker',
+      '^Use the alternate / emergency gear extension',
+      '^Ask tower for a visual check',
+      '^If it cannot be fixed: plan a gear-up landing on a hard surface',
+      '^Land on the centreline, fuel burnt down if time allows'
+    ]],
+    ['Go-around', [
+      'Call "Going around" to ATC',
+      '[ABFTPE]Full power / TOGA, pitch up ~15°',
+      '[H]Power up, nose level, accelerate to Vy and climb',
+      '^[ABFTPE]Positive rate: gear UP',
+      '~Flaps: retract one stage',
+      'Follow the missed-approach procedure',
+      'Climb to the missed-approach altitude'
+    ]],
+    ['Bird strike', [
+      'Fly the aircraft first',
+      'Check engines and controls',
+      'Squawk 7700 if damage is suspected',
+      'Land as soon as practical if damaged'
+    ]],
+    ['Low fuel', [
+      '[ABFTPH]Check fuel quantity and burn rate',
+      '[E]Check battery charge; reduce power to the best-endurance setting',
+      'Declare minimum fuel / MAYDAY fuel',
+      'Squawk 7700',
+      'Divert to the nearest suitable airport',
+      '[ABFTP]Lean mixture / reduce power for best endurance'
+    ]],
+    ['Lost communications', [
+      'Squawk 7600',
+      'Try other frequencies and the backup radio',
+      'Follow published lost-comms procedure',
+      'Continue to destination at the last assigned altitude / route',
+      'Watch for light signals at the tower'
+    ]],
+    ['Stall recovery', [
+      '[ABFTPE]Pitch DOWN, reduce angle of attack',
+      '[ABFTPE]Wings LEVEL',
+      '[ABFTPE]Full power / TOGA',
+      '[ABFTPE]Recover to level flight, then climb',
+      '[ABFTPE]Do not exceed Vne; avoid secondary stall',
+      '[PF]Spin: power IDLE, ailerons neutral, full opposite rudder, then elevator forward'
+    ]],
+    ['Tail rotor failure / settling with power', [
+      '[H]Loss of yaw: lower collective, enter autorotation (or run-on landing if forward speed allows)',
+      '[H]Settling with power: cyclic forward to gain speed, reduce collective, fly out of your own downwash',
+      '[H]Never pull collective in a high-rate descent below ~40 kt'
+    ]],
+    ['Ejection', [
+      '[F]Last resort: aircraft uncontrollable or on fire',
+      '[F]Aim to be wings level, above the ground, and clear of populated areas',
+      '[F]Declare "Eject, eject, eject", head back, pull handle'
+    ]]
+  ];
+
+  // ---------------------- Concorde / Tu-144D (supersonic) ----------------------
+  const SST_NORMAL = [
+    ['Preflight', [
+      'Flight plan filed: supersonic track over water, subsonic over land, long-runway alternate',
+      'Weather checked: OAT / ISA deviation, winds aloft, destination and alternate',
+      'Fuel loaded: trip + alternate + reserve, trim-tank (CG) fuel included',
+      'Takeoff weight and CG within limits',
+      'Runway length checked (SST needs ≈ 10,000 ft / 3,000 m or more)',
+      'NOTAMs reviewed; no supersonic flight planned over land',
+      'Altimeter set to QNH',
+      'Parking brake SET',
+      'Flight controls (elevons / rudder) free and correct',
+      'Transponder STBY, squawk code set',
+      'COM / NAV radios set',
+      'Battery / external power ON, APU or ground air connected',
+      '[C]Hydraulic systems GREEN / BLUE / YELLOW pressurised; flight-engineer panel checked',
+      '[U]Hydraulic systems pressurised; flight-engineer panel checked; canards free and correct'
+    ]],
+    ['Before start', [
+      'Parking brake SET',
+      'Beacon ON',
+      'Throttles IDLE',
+      'Area around aircraft clear',
+      'Doors closed',
+      'Start-up / pushback clearance obtained',
+      'Fuel pumps ON, feed tanks selected, trim-tank quantity checked',
+      'Cabin ready, seatbelt sign ON'
+    ]],
+    ['Engine start', [
+      '"Clear!" call made',
+      'Start engines in turn: light-up, watch EGT / ITT',
+      'Oil pressure and engine speeds normal',
+      'Generators ON',
+      'All engine indications normal, no warnings',
+      '[C]Olympus 593 reheat armed (not engaged)',
+      '[U]NK-32 afterburner (reheat) system armed'
+    ]],
+    ['After start', [
+      'Avionics ON; radios and nav set',
+      'Trim set for takeoff (CG dependent)',
+      'Flight controls full and free',
+      'Altimeter and flight instruments checked',
+      'Transponder ALT',
+      'Taxi clearance received',
+      'Taxi light ON',
+      'Parking brake RELEASED',
+      'Hydraulics normal; anti-skid ON',
+      '[C]Nose / visor DOWN for taxi visibility',
+      '[U]Nose lowered for taxi visibility; canards extended'
+    ]],
+    ['Taxi', [
+      'Brakes checked as soon as moving',
+      'Taxi ≤ 20 kt straight, ≤ 10 kt in turns; use brakes sparingly (brake heat)',
+      'Follow assigned taxiways; long fuselage and wide turns, watch wing and engine clearance',
+      'Takeoff data re-confirmed'
+    ]],
+    ['Before takeoff', [
+      'Takeoff briefing: V1, Vr, V2, rejected takeoff, engine failure',
+      'Runway and clearance confirmed',
+      'Strobes and landing lights ON',
+      'Transponder ON / ALT',
+      'Heading and altimeter match runway',
+      'Seatbelt sign ON, cabin secure; TCAS TA/RA',
+      '[C]Nose 5° DOWN, visor DOWN for takeoff',
+      '[U]Nose lowered for takeoff, canards EXTENDED',
+      'Reheat armed; fuel CG within takeoff limits'
+    ]],
+    ['Takeoff & climb-out', [
+      'Line up on centreline, nosewheel straight, release brakes',
+      'Takeoff power and full reheat, check engine instruments',
+      'Airspeed alive and cross-checked',
+      '[C]Rotate at Vr ≈ 195 kt; pitch smoothly to ~13–15° (V2 ≈ 220 kt)',
+      '[U]Rotate at Vr from performance data; pitch smoothly, watch tail clearance',
+      'Positive rate: gear UP',
+      '[C]Nose UP and visor UP after liftoff',
+      '[U]Nose raised after liftoff; canards retracted on schedule',
+      'Noise abatement: reduce reheat / thrust at ~1,500 ft AGL per procedure',
+      'Autopilot ON above ~400 ft AGL'
+    ]],
+    ['Climb', [
+      'Altimeter to 1013 / STD at transition altitude',
+      'Speed ≤ 250 kt below 10,000 ft; landing lights OFF',
+      'Seatbelt sign OFF when safe, pressurisation normal',
+      'Climb subsonic to the transonic acceleration point (≈ Mach 0.93 over water)',
+      'Transonic: reheat ON, accelerate through Mach 1 (expect CG / trim change)',
+      'Fuel transferred AFT per schedule',
+      'Reheat OFF at ≈ Mach 1.7, continue acceleration on dry thrust to Mach 2.0',
+      'Monitor TAT / skin temperature (Concorde limit ≈ 127°C TAT)'
+    ]],
+    ['Cruise', [
+      'Mach ≈ 2.0 cruise-climb set and trimmed',
+      'Fuel quantity and CG per schedule; trim transfer checked',
+      'TAT / skin temperature within limits',
+      'Cabin altitude and pressurisation normal',
+      'Engine instruments normal',
+      'Navigation: waypoints and ETA confirmed',
+      'Destination and alternate weather checked',
+      'Start deceleration ≈ 150 nm from the destination'
+    ]],
+    ['Descent', [
+      'Descent briefing: arrival, approach, runway, minimums, go-around',
+      'Thrust reduced, begin deceleration; stay inside Mach / speed limits',
+      'Fuel transferred FORWARD to bring the CG forward',
+      'Transonic deceleration: expect pitch / trim changes',
+      'Speed ≤ 250 kt below 10,000 ft',
+      'ATIS received, QNH set at transition level',
+      'Landing lights ON below 10,000 ft; seatbelt sign ON',
+      '[C]Vref ≈ 160–165 kt (depends on landing weight)',
+      '[U]Vref from landing-weight data (high speed, long landing distance)'
+    ]],
+    ['Approach', [
+      'Approach loaded and briefed; ILS frequency and course set',
+      'Cleared for the approach (verify)',
+      '[C]Nose lowered (5° then full 12.5°) and visor DOWN per speed schedule',
+      '[U]Canards EXTENDED, nose lowered per speed schedule',
+      'Localizer and glideslope captured',
+      'Missed-approach altitude set; minimums set',
+      'Stabilised by 1,000 ft (IMC) / 500 ft (VMC); expect a high pitch attitude (≈ 11–13°)'
+    ]],
+    ['Before landing', [
+      'Landing clearance received',
+      'Gear DOWN, three green',
+      '[C]Nose full DOWN (≈12.5°), visor DOWN',
+      '[U]Nose DOWN, canards EXTENDED',
+      'Landing lights ON',
+      'Speed Vref, on glidepath, descent ≤ 1,000 fpm',
+      'Autopilot disconnected by 500 ft',
+      'Avoid pitch above ~13° near the runway (tail-strike risk)',
+      'Go-around decision made at minimums'
+    ]],
+    ['After landing', [
+      'Runway vacated, clear of hold-short line',
+      '[C]Inboard reversers stowed; brake cooling fans ON, check brake temperatures',
+      '[U]Drag chute jettisoned; check brake temperatures',
+      'Strobes and landing lights OFF',
+      'Transponder STBY',
+      'Contact ground; taxi to parking'
+    ]],
+    ['Shutdown', [
+      'Parking brake SET',
+      'Throttles IDLE; engines cool 2–3 minutes',
+      'Engines shut down (fuel cut-off)',
+      'Beacon OFF; avionics OFF',
+      'Seatbelt sign OFF, doors',
+      'APU OFF, batteries OFF',
+      'Flight logged: check your landing score'
+    ]]
+  ];
+
+  const SST_EMERG = [
+    ['Engine failure – takeoff', [
+      'Before V1: reject. Throttle IDLE, brakes MAX, reversers, stop straight ahead',
+      'After V1: keep flying; do not reject',
+      'Remaining engines on full reheat; pitch for V2, hold the heading',
+      'Rudder against yaw',
+      'Gear UP at positive rate',
+      'Declare PAN-PAN / MAYDAY',
+      'Climb to a safe altitude, then return or divert'
+    ]],
+    ['Engine failure – supersonic', [
+      'Fly the aircraft: control, trim, rudder',
+      'Reheat OFF on the remaining engines if still on',
+      'Decelerate and descend to subsonic',
+      'Check for intake surge / unstart on the other engines',
+      'Squawk 7700, declare PAN-PAN',
+      'Divert to the nearest suitable airport (long runway needed)'
+    ]],
+    ['Engine surge / intake problem', [
+      'Reduce thrust on the affected engine',
+      'Check engine and intake indications',
+      'If it persists: shut the engine down per procedure',
+      'Decelerate and descend; declare PAN-PAN'
+    ]],
+    ['Engine fire', [
+      'Throttle IDLE on the affected engine',
+      'Fuel shutoff / fire handle pulled / extinguisher discharged',
+      'Squawk 7700, declare MAYDAY',
+      'Decelerate and descend, land as soon as possible',
+      'Prepare for evacuation'
+    ]],
+    ['Rapid decompression (high altitude)', [
+      'Oxygen masks ON immediately (cabin altitude rises fast)',
+      'Throttle IDLE, decelerate to subsonic',
+      'Emergency descent to 10,000 ft',
+      'Squawk 7700, declare MAYDAY',
+      'Land at the nearest suitable airport'
+    ]],
+    ['Fuel imbalance / CG shift', [
+      'Check fuel quantities and CG',
+      'Transfer fuel manually to restore the CG',
+      'Reduce speed and pitch changes if unstable',
+      'Divert if it cannot be corrected'
+    ]],
+    ['Hydraulic failure', [
+      'Identify the affected system (GREEN / BLUE / YELLOW or equivalent)',
+      'Reduce speed, avoid large control inputs',
+      'Plan alternate gear / nose extension',
+      'Declare PAN-PAN, brief a long straight-in approach',
+      'Expect reduced braking and nosewheel steering'
+    ]],
+    ['Droop nose / visor failure', [
+      'Check nose and visor position indications',
+      'If stuck down: stay below the speed limit, plan a normal landing',
+      'If stuck up: use the alternate (emergency) lowering system',
+      'Declare PAN-PAN; expect poor forward visibility on approach'
+    ]],
+    ["Gear won't extend", [
+      'Go around / level off; recycle the gear',
+      'Use the alternate / emergency gear extension',
+      'Ask tower for a visual check',
+      'Land on the centreline, fuel burnt down if time allows'
+    ]],
+    ['Tyre burst / brake fire', [
+      'Reject takeoff if before V1; otherwise continue and brief a gear check',
+      'Avoid reverse thrust and heavy braking asymmetry',
+      'Declare PAN-PAN / MAYDAY, check for fuel leaks and fire',
+      'Land with fire services standing by'
+    ]],
+    ['Go-around', [
+      'Call "Going around" to ATC',
+      'Full power / TOGA (reheat if available), pitch up smoothly (high angle of attack)',
+      'Positive rate: gear UP',
+      'Follow the missed-approach procedure',
+      'Climb to the missed-approach altitude'
+    ]],
+    ['Stall recovery', [
+      'Release back pressure, reduce angle of attack',
+      'Wings LEVEL',
+      'Full power / TOGA',
+      'Recover to level flight, then climb',
+      'High-alpha flight is normal on landing: keep power and watch the sink rate'
+    ]],
+    ['Lost communications', [
+      'Squawk 7600',
+      'Try other frequencies and the backup radio',
+      'Follow published lost-comms procedure',
+      'Continue to destination at the last assigned altitude / route'
+    ]]
+  ];
+
+  // ---------------------- Gliders and motor-gliders ----------------------
+  const GLIDER_NORMAL = [
+    ['Preflight', [
+      'Weather checked: wind, thermals, ridge lift, cloud base',
+      'Airspace and NOTAMs reviewed',
+      'Weight & balance: pilot within the cockpit load limits, ballast set',
+      'Controls free and correct (stick, rudder, airbrakes)',
+      'Tow rope / release hook inspected, release tested',
+      'Canopy locked, harness tight',
+      '[M]Battery charged; motor extension and propeller checked'
+    ]],
+    ['Before takeoff', [
+      'Airbrakes CLOSED and LOCKED',
+      'Trim set for takeoff',
+      'Controls full and free, canopy closed and locked',
+      'Altimeter set (QNH or field elevation)',
+      'Launch signals agreed; wind and runway checked',
+      '^Gear DOWN and locked (if retractable)'
+    ]],
+    ['Takeoff & climb-out', [
+      'Keep wings level, use rudder and aileron on the rope',
+      'Hold the tow position (high or low) as briefed',
+      'Release at the planned height, turn away from the tow plane',
+      '[M]Self-launch: motor ON, climb at best-climb speed, then retract the motor above safe altitude'
+    ]],
+    ['Cruise', [
+      'Fly the best glide / speed-to-fly for the conditions',
+      'Circle in thermals in the same direction as others',
+      'Always keep a safe landing field within glide range',
+      'Final glide: leave at least 1,000 ft of margin',
+      'Monitor wind, drift and cloud base'
+    ]],
+    ['Descent', [
+      'Choose the landing field and joining point',
+      'Join the pattern at ~1,000 ft AGL',
+      'Approach speed: ≈1.5 × stall speed + half the wind gust',
+      '[M]Motor stowed and OFF'
+    ]],
+    ['Approach', [
+      'Downwind at ~800–1,000 ft AGL, base at ~600 ft, final above ~300 ft',
+      'Use airbrakes to control the glidepath',
+      'Keep the speed steady, no stretching the glide'
+    ]],
+    ['Before landing', [
+      '^Gear DOWN and locked (if retractable)',
+      'Airbrakes ready, speed Vref + gust margin',
+      'Field and wind checked, nothing on the runway'
+    ]],
+    ['After landing', [
+      'Land straight and keep wings level',
+      'Stop, airbrakes open, clear the runway',
+      'Canopy open, tie down / secure'
+    ]]
+  ];
+  const GLIDER_EMERG = [
+    ['Rope break / launch failure', [
+      'Nose DOWN immediately to keep flying speed',
+      'Low altitude: land straight ahead',
+      'Higher altitude: release the rope and fly a modified circuit',
+      'Airbrakes only after the landing is assured'
+    ]],
+    ['Out-landing (no lift)', [
+      'Choose the field early (length, slope, obstacles, wind)',
+      'Fly a standard pattern with the airbrakes ready',
+      'Gear DOWN if retractable',
+      'Land into the wind, ground-loop if needed to stop short'
+    ]],
+    ['Stall / spin recovery', [
+      'Stick FORWARD, opposite rudder to stop the rotation',
+      'Ailerons neutral, then pull out gently',
+      'Do not exceed Vne in the recovery'
+    ]],
+    ['Airbrake failure', [
+      'Use a slip to lose height',
+      'Fly a longer final and higher speed',
+      'Use the full field length'
+    ]]
+  ];
+
+  // ---------------------- Starship SN5 hop ----------------------
+  const STARSHIP_NORMAL = [
+    ['Preflight', [
+      'Pad and range clear',
+      'Propellant (methane + oxygen) loaded and pressures checked',
+      'Flight-termination system armed',
+      'Weather and winds within limits'
+    ]],
+    ['Before start', [
+      'Engine chill-down complete',
+      'Tank pressures stable',
+      'Flight computers and gimbals checked',
+      'Go for launch'
+    ]],
+    ['Engine start', [
+      'Raptor ignition sequence started',
+      'Thrust stable and nominal',
+      'All engine indications normal'
+    ]],
+    ['Takeoff & climb-out', [
+      'Throttle up, liftoff',
+      'Gimbal control checked: nose straight',
+      'Climb to hop altitude (SN5 hopped ≈150 m)'
+    ]],
+    ['Cruise', [
+      'Hover / hold altitude',
+      'Translate towards the landing pad',
+      'Monitor propellant and engine thrust'
+    ]],
+    ['Descent', [
+      'Reduce thrust, begin the descent',
+      'Keep the vehicle vertical',
+      'Line up above the landing pad'
+    ]],
+    ['Before landing', [
+      'Landing legs ready',
+      'Reduce descent rate, throttle down for touchdown',
+      'Keep the vehicle upright for the landing'
+    ]],
+    ['After landing', [
+      'Engine cut-off',
+      'Vehicle stable on its legs'
+    ]],
+    ['Shutdown', [
+      'Vent propellants, depressurise tanks',
+      'Wait for "all clear" before approaching'
+    ]]
+  ];
+  const STARSHIP_EMERG = [
+    ['Engine anomaly', [
+      'Cut thrust if the vehicle cannot hold attitude',
+      'Abort the hop; clear the pad area',
+      'Safe the vehicle after landing'
+    ]],
+    ['Loss of control', [
+      'Command engine cut-off',
+      'Do not re-ignite until the vehicle is stable',
+      'Evacuate the range'
+    ]],
+    ['Hard landing', [
+      'Check leg and tank integrity',
+      'Vent propellant, depressurise',
+      'Keep personnel clear'
+    ]]
+  ];
+
+  const LISTS = {
+    B: { normal: NORMAL, emerg: EMERG },
+    C: { normal: SST_NORMAL, emerg: SST_EMERG },
+    G: { normal: GLIDER_NORMAL, emerg: GLIDER_EMERG },
+    S: { normal: STARSHIP_NORMAL, emerg: STARSHIP_EMERG }
+  };
+  const LISTKEY = { C: 'C', U: 'C', G: 'G', M: 'G', S: 'S', N: 'N' };
+
+  // =====================================================================
+  //  PANEL
+  // =====================================================================
+  p.body.innerHTML = `
+    <div class="row"><span>Aircraft type</span>
+      <select id="ck-type"><option value="auto">Auto-detect</option></select></div>
+    <div id="ck-info"></div>
+    <div id="ck-nav" style="display:flex;gap:4px;align-items:center;margin:6px 0">
+      <button class="g" id="ck-prev" style="margin:0">◀</button>
+      <select id="ck-phase" style="flex:1"></select>
+      <button class="g" id="ck-next" style="margin:0">▶</button>
+    </div>
+    <div id="ck-list"></div>
+    <div id="ck-hint"></div>
+    <div id="ck-btns" style="margin-top:6px"><button class="g" id="ck-reset">Reset list</button><button class="g" id="ck-resetall">Reset all</button></div>
+    <label class="ck" id="ck-fol" style="margin-top:6px"><input type="checkbox" id="ck-follow"><span>Follow my flight automatically (switches the list for you)</span></label>`;
+
+  $('ck-type').innerHTML = '<option value="auto">Auto-detect</option>' +
+    Object.keys(TYPE_LABEL).map(k => `<option value="${k}">${esc(TYPE_LABEL[k])}</option>`).join('');
+
+  let nameRaw = '', nameLC = '';
+  let typeSel = LS.get('gfl_cktype4', 'auto');
+  let follow = !!LS.get('gfl_ckfollow', false);
+  let phase = LS.get('gfl_phase4', 'Preflight');
+  const checks = LS.get('gfl_checks4', {});
+
+  const curType = () => typeSel === 'auto' ? detectType(nameLC) : typeSel;
+  const listKey = () => LISTKEY[curType()] || 'B';
+  const ckey = n => listKey() + '|' + n;
+
+  function profile() {
+    const t = curType();
+    let e = null;
+    for (const f of FLAPS) if (f[0].test(nameLC)) { e = f[1]; break; }
+    const P = Object.assign({}, FLAPS_DEFAULT[t] || {}, e || {});
+    P.fixed = FIXED_GEAR.test(nameLC);
+    P.single = SINGLE_ENGINE.test(nameLC);
+    return P;
+  }
+
+  function matches(tags, t) {
+    if (!tags) return true;
+    return tags.indexOf(t) >= 0 || (t === 'M' && tags.indexOf('G') >= 0);
+  }
+
+  function allPhases() { const L = LISTS[listKey()]; return L ? L.normal.concat(L.emerg) : []; }
+  function normalCount() { const L = LISTS[listKey()]; return L ? L.normal.length : 0; }
+
+  function itemsFor(name) {
+    const t = curType(), P = profile(), out = [];
+    const ph = allPhases().find(a => a[0] === name);
+    if (!ph) return out;
+    ph[1].forEach(raw => {
+      let s = raw, tags = null, m = s.match(/^\[([A-Z]+)\]/);
+      if (m) { tags = m[1]; s = s.slice(m[0].length); }
+      let needFlaps = false, needGear = false, single = false, multi = false;
+      while (s[0] === '~' || s[0] === '^' || s[0] === '*' || s[0] === '+') {
+        if (s[0] === '~') needFlaps = true; else if (s[0] === '^') needGear = true;
+        else if (s[0] === '*') single = true; else multi = true;
+        s = s.slice(1);
+      }
+      // a second tag block may follow a marker, e.g. ^[ABFTPE]text
+      m = s.match(/^\[([A-Z]+)\]/);
+      if (m) { tags = m[1]; s = s.slice(m[0].length); }
+      while (s[0] === '~' || s[0] === '^' || s[0] === '*' || s[0] === '+') {
+        if (s[0] === '~') needFlaps = true; else if (s[0] === '^') needGear = true;
+        else if (s[0] === '*') single = true; else multi = true;
+        s = s.slice(1);
+      }
+      if (!matches(tags, t)) return;
+      if (needFlaps && P.noFlaps) return;
+      if (needGear && P.fixed) return;
+      if (single && !P.single) return;
+      if (multi && P.single) return;
+      s = s.replace(/\{TO\}/g, P.to || '').replace(/\{APP\}/g, P.app || '').replace(/\{LDG\}/g, P.ldg || '');
+      out.push(s);
+    });
+    return out;
+  }
+
+  function visPhases() { return allPhases().filter(a => itemsFor(a[0]).length > 0); }
+  function visNames() { return visPhases().map(a => a[0]); }
+  const doneCount = name => { const st = checks[ckey(name)] || {}; const it = itemsFor(name); return [it.filter(x => st[x]).length, it.length]; };
+
+  function infoHtml() {
+    const t = curType(), P = profile();
+    if (listKey() === 'N') return '';
+    let h = '';
+    if (!P.noFlaps && (P.to || P.ldg)) {
+      h += `Flaps · TO: <b>${esc(P.to || '—')}</b> · APP: <b>${esc(P.app || '—')}</b> · LDG: <b>${esc(P.ldg || '—')}</b>`;
+    } else if (P.noFlaps && t !== 'H') {
+      h += 'Flaps: <b>none</b>';
+    }
+    if (P.note) h += (h ? '<br>' : '') + esc(P.note);
+    return h ? `<div class="fl">${h}</div>` : '';
+  }
+
+  function buildSelect() {
+    const sel = $('ck-phase'), nn = normalCount();
+    const opt = n => { const d = doneCount(n); return `<option value="${esc(n)}"${n === phase ? ' selected' : ''}>${d[0] === d[1] ? '✓ ' : ''}${esc(n)} (${d[0]}/${d[1]})</option>`; };
+    const normal = visPhases().filter(a => LISTS[listKey()].normal.indexOf(a) >= 0).map(a => opt(a[0])).join('');
+    const emerg = visPhases().filter(a => LISTS[listKey()].emerg.indexOf(a) >= 0).map(a => opt(a[0])).join('');
+    sel.innerHTML = '<optgroup label="Normal procedures">' + normal + '</optgroup><optgroup label="Emergency / abnormal">' + emerg + '</optgroup>';
+  }
+
+  function render() {
+    const t = curType(), key = listKey(), isN = key === 'N';
+    $('ck-type').value = typeSel;
+    $('ck-follow').checked = follow;
+    $('ck-info').innerHTML = infoHtml();
+    ['ck-nav', 'ck-btns', 'ck-fol', 'ck-hint'].forEach(id => { $(id).style.display = isN ? 'none' : ''; });
+    if (isN) {
+      $('ck-list').innerHTML = `<div class="muted" style="margin:8px 0">No checklist for this aircraft (${esc(nameRaw || 'unknown')}). Balloons, paragliders, wingsuits, hang gliders and cars have no normal procedures. Pick a type above if you want a checklist anyway.</div>`;
+      return;
+    }
+    const names = visNames();
+    if (names.indexOf(phase) < 0) phase = names[0];
+    buildSelect();
+    const st = checks[ckey(phase)] || {}, items = itemsFor(phase), d = doneCount(phase);
+    $('ck-list').innerHTML =
+      `<div class="muted" style="margin-bottom:2px">${d[0]}/${d[1]} complete${d[0] === d[1] ? ' ✓' : ''} · ${esc(TYPE_LABEL[t])}${nameRaw ? ' · ' + esc(nameRaw) : ''}</div>` +
+      items.map((x, i) => `<label class="ck ${st[x] ? 'done' : ''}"><input type="checkbox" data-i="${i}" ${st[x] ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('');
+    $('ck-list').querySelectorAll('input').forEach(cb => cb.onchange = () => {
+      const map = checks[ckey(phase)] || (checks[ckey(phase)] = {});
+      map[items[+cb.dataset.i]] = cb.checked; LS.set('gfl_checks4', checks); render();
+    });
+    const nrm = LISTS[key].normal.map(a => a[0]).filter(n => names.indexOf(n) >= 0);
+    const idx = nrm.indexOf(phase), hint = $('ck-hint');
+    if (d[0] === d[1] && d[1] > 0 && idx >= 0 && idx < nrm.length - 1) {
+      hint.innerHTML = `<button id="ck-go" style="margin-top:6px">Next: ${esc(nrm[idx + 1])} ▶</button>`;
+      $('ck-go').onclick = () => setPhase(nrm[idx + 1]);
+    } else hint.innerHTML = '';
+  }
+  function setPhase(n) { phase = n; LS.set('gfl_phase4', phase); render(); }
+
+  $('ck-phase').onchange = e => setPhase(e.target.value);
+  $('ck-prev').onclick = () => { const n = visNames(); setPhase(n[(n.indexOf(phase) - 1 + n.length) % n.length]); };
+  $('ck-next').onclick = () => { const n = visNames(); setPhase(n[(n.indexOf(phase) + 1) % n.length]); };
+  $('ck-type').onchange = e => { typeSel = e.target.value; LS.set('gfl_cktype4', typeSel); render(); };
+  $('ck-follow').onchange = e => { follow = e.target.checked; LS.set('gfl_ckfollow', follow); };
+  $('ck-reset').onclick = () => { checks[ckey(phase)] = {}; LS.set('gfl_checks4', checks); render(); };
+  $('ck-resetall').onclick = () => { if (confirm('Untick every checklist?')) { Object.keys(checks).forEach(k => delete checks[k]); LS.set('gfl_checks4', checks); render(); } };
+  render();
+
+  // ---- aircraft change detection + optional follow-the-flight ----
+  let landed = false, cand = null, candAt = 0;
+  createTracker(function (c) {
+    const nm = acName();
+    if (nm !== nameRaw) { nameRaw = nm; nameLC = nm.toLowerCase(); render(); }
+    if (!follow || listKey() === 'N') return;
+    const T = c.T, h = typeof c.av.haglFeet === 'number' ? c.av.haglFeet : (c.onGround ? 0 : 5000), vs = T.vs;
+    let ph = null;
+    if (c.onGround) {
+      if (landed) ph = T.gs > 3 ? 'After landing' : 'Shutdown';
+      else if (T.gs > 40) ph = 'Takeoff & climb-out';
+      else if (T.gs > 3) ph = 'Taxi';
+    } else {
+      landed = false;
+      if (h < 1500 && vs > 200) ph = 'Takeoff & climb-out';
+      else if (vs > 300) ph = 'Climb';
+      else if (h > 3000 && vs > -300) ph = 'Cruise';
+      else if (h > 3000) ph = 'Descent';
+      else if (h > 800) ph = 'Approach';
+      else ph = 'Before landing';
+    }
+    if (ph && visNames().indexOf(ph) < 0) ph = null;      // this aircraft has no such phase
+    const now = performance.now();
+    if (ph && ph !== phase) {
+      if (cand !== ph) { cand = ph; candAt = now; }
+      else if (now - candAt > 3000) { cand = null; setPhase(ph); }
+    } else cand = null;
+  }, function () { landed = true; });
+
+})();
