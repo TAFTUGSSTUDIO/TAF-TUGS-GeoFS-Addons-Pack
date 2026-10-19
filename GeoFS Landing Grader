@@ -1,0 +1,229 @@
+// ==UserScript==
+// @name         GeoFS Landing Grader
+// @namespace    geofs-plugins
+// @version      1
+// @description  Grades each landing (BUTTER to CRASH, scored 0-10) and shows live flight stats with distance/ETA to a target.
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://geo-fs.com/geofs.php*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ===== shared mini-library (identical in every GeoFS Companion plugin) =====
+  const M_TO_FT = 3.28084, M_TO_NM = 1 / 1852;
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
+  };
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  function haversineNm(a, b) {
+    const R = 6371000, rad = Math.PI / 180;
+    const dLat = (b[0] - a[0]) * rad, dLon = (b[1] - a[1]) * rad;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h)) * M_TO_NM;
+  }
+  function fmtTime(s) {
+    s = Math.max(0, Math.floor(s));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ':' : '') + String(m).padStart(h ? 2 : 1, '0') + ':' + String(sec).padStart(2, '0');
+  }
+  function fmtHM(h) {
+    if (!isFinite(h) || h > 99) return '—';
+    const m = Math.round(h * 60);
+    return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  }
+  function score10(vs) { return clamp(10 - (vs - 50) / 75, 0, 10); }
+  function grade(vs) {
+    if (vs < 60)  return { g: 'BUTTER', c: '#4ade80', t: 'Smooth as silk.' };
+    if (vs < 150) return { g: 'GREAT',  c: '#86efac', t: 'Very nice landing.' };
+    if (vs < 300) return { g: 'GOOD',   c: '#fde047', t: 'Solid, passengers happy.' };
+    if (vs < 500) return { g: 'FIRM',   c: '#fb923c', t: 'You felt that one.' };
+    if (vs < 800) return { g: 'HARD',   c: '#f87171', t: 'Maintenance will be notified.' };
+    return { g: 'CRASH?', c: '#ef4444', t: 'Hope the gear is still attached.' };
+  }
+  function acName() {
+    try { return geofs.aircraft.instance.aircraftRecord.name || 'Aircraft'; } catch (e) { return 'Aircraft'; }
+  }
+
+  // Target (lat, lon) shared between plugins through localStorage
+  const Target = (function () {
+    let cache = LS.get('gfl_target', null), at = performance.now();
+    return {
+      get() { const n = performance.now(); if (n - at > 1000) { cache = LS.get('gfl_target', null); at = n; } return cache; },
+      set(v) { cache = v; at = performance.now(); LS.set('gfl_target', v); },
+      parse(str) { const m = String(str).match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/); return m ? [parseFloat(m[1]), parseFloat(m[2])] : null; }
+    };
+  })();
+
+  // Floating, draggable, collapsible panel. slot = default column (0 = rightmost)
+  function createPanel(opts) {
+    if (!document.getElementById('gfl-css')) {
+      const st = document.createElement('style'); st.id = 'gfl-css';
+      st.textContent = `
+      html[data-gfl-hidden] .gfl-panel{display:none!important}
+      .gfl-panel{position:fixed;width:250px;z-index:99999;font:12px/1.4 system-ui,sans-serif;color:#e5e7eb;
+        background:rgba(15,18,24,.9);border:1px solid #334155;border-radius:10px;backdrop-filter:blur(6px);
+        box-shadow:0 6px 24px rgba(0,0,0,.45);user-select:none}
+      .gfl-hd{padding:7px 10px;cursor:move;display:flex;justify-content:space-between;align-items:center;font-weight:600;letter-spacing:.3px}
+      .gfl-min{cursor:pointer;opacity:.6;padding:0 4px}
+      .gfl-bd{padding:8px 10px;max-height:60vh;overflow-y:auto;border-top:1px solid #334155}
+      .gfl-panel .row{display:flex;justify-content:space-between;align-items:center;padding:1px 0}
+      .gfl-panel .row b{font-variant-numeric:tabular-nums;color:#fff}
+      .gfl-panel .sec{margin-top:7px;padding-top:6px;border-top:1px dashed #334155}
+      .gfl-panel .muted{opacity:.6}
+      .gfl-panel .big{font-size:15px;font-weight:700}
+      .gfl-panel input[type=text],.gfl-panel input[type=number]{width:100%;box-sizing:border-box;background:#0b0e13;color:#e5e7eb;
+        border:1px solid #334155;border-radius:5px;padding:4px 6px;margin:3px 0;font-size:12px}
+      .gfl-panel input.sm{width:70px;text-align:right;margin:0}
+      .gfl-panel button{background:#2563eb;border:0;color:#fff;border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11px;margin:2px 4px 2px 0}
+      .gfl-panel button.g{background:#334155}
+      .gfl-panel .land{padding:5px 7px;margin:4px 0;border-radius:6px;background:rgba(255,255,255,.05);border-left:4px solid}
+      .gfl-panel .bar{height:8px;border-radius:4px;background:#0b0e13;border:1px solid #334155;overflow:hidden;margin:5px 0}
+      .gfl-panel .bar i{display:block;height:100%;width:100%;background:#4ade80;transition:width .3s}
+      .gfl-panel label.ck{display:flex;gap:7px;padding:3px 0;cursor:pointer;align-items:flex-start}
+      .gfl-panel label.ck.done span{text-decoration:line-through;opacity:.5}
+      .gfl-panel .ph{display:flex;flex-wrap:wrap;margin-bottom:4px}
+      .gfl-panel .ph button{background:#334155}.gfl-panel .ph button.on{background:#2563eb}
+      .gfl-panel .hrow{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.06)}`;
+      document.head.appendChild(st);
+    }
+    const el = document.createElement('div');
+    el.className = 'gfl-panel'; el.id = 'gfl-' + opts.id;
+    el.innerHTML = `<div class="gfl-hd"><span>${opts.title}</span><span class="gfl-min" title="Collapse / expand">–</span></div><div class="gfl-bd"></div>`;
+    document.body.appendChild(el);
+    const hd = el.querySelector('.gfl-hd'), body = el.querySelector('.gfl-bd'), minBtn = el.querySelector('.gfl-min');
+
+    const pos = LS.get('gfl_pos_' + opts.id, null);
+    if (pos) { el.style.left = clamp(pos.left, 0, innerWidth - 60) + 'px'; el.style.top = clamp(pos.top, 0, innerHeight - 30) + 'px'; }
+    else { el.style.top = '80px'; el.style.right = (12 + (opts.slot || 0) * 260) + 'px'; }
+
+    const setMin = m => { body.style.display = m ? 'none' : ''; minBtn.textContent = m ? '+' : '–'; LS.set('gfl_min_' + opts.id, m); };
+    setMin(!!LS.get('gfl_min_' + opts.id, false));
+    minBtn.onclick = () => setMin(body.style.display !== 'none');
+
+    let drag = false, ox = 0, oy = 0;
+    hd.addEventListener('mousedown', e => { if (e.target === minBtn) return; drag = true; ox = e.clientX - el.offsetLeft; oy = e.clientY - el.offsetTop; });
+    window.addEventListener('mouseup', () => { if (drag) { drag = false; LS.set('gfl_pos_' + opts.id, { left: el.offsetLeft, top: el.offsetTop }); } });
+    window.addEventListener('mousemove', e => {
+      if (!drag) return;
+      el.style.left = (e.clientX - ox) + 'px'; el.style.top = (e.clientY - oy) + 'px'; el.style.right = 'auto';
+    });
+    // typing in a panel must not trigger GeoFS hotkeys
+    ['keydown', 'keyup', 'keypress'].forEach(ev =>
+      el.addEventListener(ev, e => { if (e.target.tagName === 'INPUT') e.stopPropagation(); }));
+    // Alt+H hides/shows every Flight Companion panel (handled once even if several plugins are installed)
+    window.addEventListener('keydown', e => {
+      if (e.altKey && e.key.toLowerCase() === 'h' && !e.__gflHandled) {
+        e.__gflHandled = true; document.documentElement.toggleAttribute('data-gfl-hidden');
+      }
+    });
+    return { el, body, $: id => el.querySelector('#' + id) };
+  }
+
+  // Reads GeoFS ~10x/s and calls onTick every frame and onTouchdown on a real landing
+  function createTracker(onTick, onTouchdown) {
+    const T = { last: null, vs: 0, gs: 0, prevVs: 0, prevGs: 0, wasGround: true, wasHigh: false, airSec: 0 };
+    function tick() {
+      const inst = window.geofs && geofs.aircraft && geofs.aircraft.instance;
+      if (!inst || !inst.llaLocation) return;
+      if (typeof geofs.isPaused === 'function' && geofs.isPaused()) return;
+      const lla = inst.llaLocation.slice(0, 3);          // [lat, lon, alt metres]
+      const now = performance.now() / 1000;
+      const av = (geofs.animation && geofs.animation.values) || {};
+      const hagl = typeof av.haglFeet === 'number' ? av.haglFeet : null;
+      const onGround = !!inst.groundContact || (hagl !== null && hagl < 2);
+      if (!onGround && (hagl === null ? T.airSec > 15 : hagl > 50)) T.wasHigh = true;
+      let dt = 0, dNm = 0, gsInst = 0;
+      if (T.last) {
+        const d = now - T.last.t;
+        if (d > 0 && d < 1) {
+          const nm = haversineNm(T.last.lla, lla), g = (nm * 3600) / d;
+          if (g < 3000) {                                  // ignore teleports / respawns
+            dt = d; dNm = nm; gsInst = g;
+            const vsInst = ((lla[2] - T.last.lla[2]) * M_TO_FT * 60) / d;
+            T.gs = T.gs * 0.8 + g * 0.2; T.vs = T.vs * 0.8 + vsInst * 0.2;
+            if (!onGround) T.airSec += d;
+          }
+        }
+      }
+      onTick({ T, lla, dt, dNm, gsInst, onGround, av });
+      if (!T.wasGround && onGround && T.wasHigh) {
+        onTouchdown({ vs: Math.max(0, -T.prevVs), gs: T.prevGs });
+        T.wasHigh = false;
+      }
+      if (!onGround) { T.prevVs = T.vs; T.prevGs = T.gs; }
+      T.wasGround = onGround; T.last = { lla, t: now };
+    }
+    setInterval(() => { try { tick(); } catch (e) { /* GeoFS not ready yet */ } }, 100);
+    return T;
+  }
+  // ===== end shared library =====
+
+  const p = createPanel({ id: 'grader', title: '✈ Landing Grader', slot: 0 });
+  const $ = p.$;
+  p.body.innerHTML = `
+    <div class="row"><span>Status</span><b id="gl-state">—</b></div>
+    <div class="row"><span>Flight time</span><b id="gl-time">0:00</b></div>
+    <div class="row"><span>Distance flown</span><b id="gl-dist">0.0 nm</b></div>
+    <div class="row"><span>Ground speed</span><b id="gl-gs">0 kt</b></div>
+    <div class="row"><span>Vertical speed</span><b id="gl-vs">0 fpm</b></div>
+    <div class="row"><span>Max alt / speed</span><b id="gl-max">0 ft / 0 kt</b></div>
+    <div class="sec">
+      <div class="muted">Target (lat, lon)</div>
+      <input type="text" id="gl-tgt" placeholder="e.g. 51.4706, -0.4619">
+      <button id="gl-set">Set</button><button class="g" id="gl-clr">Clear</button>
+      <div class="row" style="margin-top:4px"><span>Distance</span><b id="gl-td">—</b></div>
+      <div class="row"><span>ETA</span><b id="gl-eta">—</b></div>
+    </div>
+    <div class="sec">
+      <div class="row"><span class="muted">Landings (this session)</span><button class="g" id="gl-reset">Clear</button></div>
+      <div id="gl-lands"></div>
+    </div>`;
+
+  const S = { dist: 0, maxAlt: 0, maxGs: 0, landings: [] };
+  const t0 = Target.get(); if (t0) $('gl-tgt').value = t0[0] + ', ' + t0[1];
+  $('gl-set').onclick = () => { const t = Target.parse($('gl-tgt').value); if (t) Target.set(t); };
+  $('gl-clr').onclick = () => { Target.set(null); $('gl-tgt').value = ''; };
+  $('gl-reset').onclick = () => { S.landings = []; renderLandings(); };
+
+  function renderLandings() {
+    const box = $('gl-lands');
+    if (!S.landings.length) { box.innerHTML = '<span class="muted">None yet — go land something.</span>'; return; }
+    box.innerHTML = S.landings.slice(-4).reverse().map(l =>
+      `<div class="land" style="border-color:${l.gr.c}">
+         <div class="big" style="color:${l.gr.c}">${l.gr.g} · ${l.score.toFixed(1)}/10</div>
+         <div>${Math.round(l.vs)} fpm · ${Math.round(l.gs)} kt</div>
+         <div class="muted">${l.gr.t}</div>
+       </div>`).join('');
+  }
+  renderLandings();
+
+  createTracker(function (c) {
+    const T = c.T;
+    if (c.dt > 0) {
+      if (!c.onGround || T.gs > 5) S.dist += c.dNm;
+      S.maxGs = Math.max(S.maxGs, T.gs);
+      S.maxAlt = Math.max(S.maxAlt, c.lla[2] * M_TO_FT);
+    }
+    $('gl-state').textContent = c.onGround ? 'GND' : 'AIR';
+    $('gl-time').textContent = fmtTime(T.airSec);
+    $('gl-dist').textContent = S.dist.toFixed(1) + ' nm';
+    $('gl-gs').textContent = Math.round(T.gs) + ' kt';
+    $('gl-vs').textContent = Math.round(T.vs / 10) * 10 + ' fpm';
+    $('gl-max').textContent = Math.round(S.maxAlt) + ' ft / ' + Math.round(S.maxGs) + ' kt';
+    const tg = Target.get();
+    if (tg) {
+      const d = haversineNm(c.lla, tg);
+      $('gl-td').textContent = d.toFixed(1) + ' nm';
+      $('gl-eta').textContent = T.gs > 30 ? fmtTime((d / T.gs) * 3600) : '—';
+    } else { $('gl-td').textContent = '—'; $('gl-eta').textContent = '—'; }
+  }, function (td) {
+    const gr = grade(td.vs);
+    S.landings.push({ vs: td.vs, gs: td.gs, gr: gr, score: score10(td.vs) });
+    renderLandings();
+  });
+
+})();
