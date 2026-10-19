@@ -11,3 +11,5 @@ pusg forward works by T
 anymore questions let me know and also the push back is still on the works there be more planes soon
 
 temporary pushback tug model until we have our own model
+
+how the GeoFS Move around cockpit works is that hold in shift and arrow keys to move whever you want in the cockpit
