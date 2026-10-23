@@ -1,262 +1,527 @@
 // ==UserScript==
 // @name         MCP PANEL
 // @namespace    http://tampermonkey.net/
-// @version      1
-// @description  Boeing MCP panel with dynamic color theme matching for real aircraft cockpits (Airbus, Boeing, Antonov/Soviet, Military, GA, CRJ, Embraer)
+// @version      3
+// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft: 737 style, 747/757/767/777/787 style (drum or LED displays), Airbus FCU, plus Soviet/military/GA/regional colour themes. Everything drawn in SVG/CSS.
 // @match        https://*.geo-fs.com/geofs.php*
 // @grant        none
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    // CUSTOM DIAL TEXTURE URL
-    const DIAL_TEXTURE_URL = 'https://6a9f4f89b9f3f1e956cba77c.imgix.net/sandbox/ggggggggg%20-%20Copdy.png';
+    ['geofs-mcp-container', 'geofs-mcp-tab', 'geofs-mcp-style'].forEach(id => {
+        const e = document.getElementById(id);
+        if (e) e.remove();
+    });
 
-    if (document.getElementById('geofs-mcp-container')) {
-        document.getElementById('geofs-mcp-container').remove();
-    }
-    if (document.getElementById('geofs-mcp-tab')) {
-        document.getElementById('geofs-mcp-tab').remove();
-    }
+    const $ = id => document.getElementById(id);
+    let W = 1592, H = 253;
+    let scaleMul = 1;
 
+    // ------------------------------------------------------------------ CSS
     const style = document.createElement('style');
-    const dialBgCSS = DIAL_TEXTURE_URL ? `url('${DIAL_TEXTURE_URL}')` : 'none';
+    style.id = 'geofs-mcp-style';
+    style.textContent = `
+    #geofs-mcp-container{position:fixed;bottom:34px;left:50%;transform:translateX(-50%);z-index:999999;display:none;
+        user-select:none;cursor:move;border-radius:10px;box-shadow:0 14px 40px rgba(0,0,0,.85);
+        --bg:#575b5f;--border:#26282a;--txt:#f3f3f3;--disp:#f6f6f6;--face:#17181a;--k1:#a7a9ab;--k2:#5a5d60;}
+    #mcp-stage{position:absolute;left:0;top:0;box-sizing:border-box;transform-origin:0 0;
+        border:4px solid var(--border);border-radius:14px;overflow:hidden;color:var(--txt);
+        font-family:Arial,Helvetica,sans-serif;
+        background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(0,0,0,.17)),var(--bg);}
+    #mcp-stage .lab{position:absolute;transform:translate(-50%,-50%);font-weight:bold;font-size:17px;line-height:1.1;
+        text-align:center;color:var(--txt);white-space:nowrap;letter-spacing:.3px;pointer-events:none}
+    #mcp-stage .lab.sm{font-size:15px}
+    #mcp-stage .lab.xs{font-size:12px}
+    .mcp-static{position:absolute;left:0;top:0;pointer-events:none}
+    .mcp-static .ln{stroke:var(--txt);stroke-width:2.5;fill:none;stroke-linecap:round}
 
-    style.innerHTML = `
-        #geofs-mcp-container {
-            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-            z-index: 999999;
-            background-color: var(--mcp-bg-main, #141414);
-            background-image:
-                radial-gradient(ellipse at center, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.4) 100%),
-                repeating-linear-gradient(45deg, rgba(0,0,0,0.03) 0px, rgba(0,0,0,0.03) 2px, transparent 2px, transparent 4px);
-            border: 3px solid var(--mcp-border, #0a0a0a); border-radius: 8px; padding: 12px 16px;
-            box-shadow: 0 12px 35px rgba(0,0,0,0.85); font-family: Arial, sans-serif;
-            color: #ffffff; display: none; width: 850px; box-sizing: border-box; user-select: none;
-            transition: background-color 0.4s ease, border-color 0.4s ease;
-            cursor: move;
-        }
-        .mcp-section { display: inline-block; vertical-align: top; margin-right: 14px; text-align: center; cursor: default; }
-        .mcp-label { font-size: 10px; font-weight: bold; letter-spacing: 1px; color: #f2e2d0; margin-bottom: 5px; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+    .disp{position:absolute;box-sizing:border-box;background:linear-gradient(#030303,#101010);border:3px solid #1c1c1c;
+        border-radius:5px;box-shadow:0 0 0 2px rgba(0,0,0,.45),inset 0 0 10px #000;display:flex;align-items:center;
+        justify-content:center;gap:8px;cursor:ns-resize;overflow:hidden}
+    .disp::after{content:'';position:absolute;left:0;right:0;top:0;height:45%;
+        background:linear-gradient(rgba(255,255,255,.09),rgba(255,255,255,0));pointer-events:none}
+    .disp.lcd{background:none;border:none;box-shadow:none;gap:6px}
+    .disp.lcd::after{display:none}
+    .disp.drum{gap:0;justify-content:stretch;border-width:2px;border-radius:2px}
+    .dg{width:23px;height:32px;flex:none;overflow:visible}
+    .dg .off{fill:rgba(255,255,255,.07)}
+    .dg .on{fill:var(--disp);filter:drop-shadow(0 0 2.5px var(--disp))}
+    .dr{display:flex;width:100%;height:100%}
+    .dr span{flex:1;display:flex;align-items:center;justify-content:center;font:bold 26px Arial,Helvetica,sans-serif;
+        color:var(--disp);border-left:1px solid #3a3a3a;border-right:1px solid #1a1a1a;position:relative;
+        background:linear-gradient(#0a0a0a,#1b1b1b 50%,#0a0a0a)}
+    .dr span::after{content:'';position:absolute;inset:0;
+        background:linear-gradient(rgba(0,0,0,.7),rgba(0,0,0,0) 32%,rgba(0,0,0,0) 68%,rgba(0,0,0,.7))}
 
-        .mcp-screen-box {
-            background: #080808; border: 2px inset #3a3a3a;
-            border-radius: 3px; width: 85px; height: 32px; box-sizing: border-box; margin: 0 auto;
-            box-shadow: inset 0 3px 6px rgba(0,0,0,0.95); position: relative; overflow: hidden;
-            cursor: ns-resize; touch-action: none;
-        }
-        .mcp-screen-box::after {
-            content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 50%;
-            background: linear-gradient(to bottom, rgba(255,255,255,0.08), rgba(255,255,255,0));
-            pointer-events: none; z-index: 5;
-        }
-        .drum-strip {
-            position: absolute; width: 100%; top: 0; left: 0;
-            transition: transform 0.1s cubic-bezier(0.1, 0.8, 0.2, 1);
-        }
-        .drum-digit {
-            height: 32px; line-height: 30px; text-align: center;
-            color: #ff9933; font-family: Arial, sans-serif; font-size: 18px; font-weight: bold;
-            text-shadow: 0 0 5px rgba(255,153,51,0.4);
-        }
+    .lcdp{position:absolute;box-sizing:border-box;background:linear-gradient(#050505,#101214);border:2px solid #1b2024;
+        border-radius:6px;box-shadow:inset 0 0 10px #000,0 0 0 2px rgba(0,0,0,.4)}
 
-        .mcp-btn {
-            background: linear-gradient(to bottom, #262626, #161616); border: 2px solid #484848; color: #fff; font-size: 10px; font-weight: bold;
-            padding: 5px 4px; margin-top: 5px; cursor: pointer; border-radius: 3px; width: 48px;
-            text-align: center; display: inline-block; box-shadow: inset 0 1px 2px rgba(255,255,255,0.15), 0 2px 4px rgba(0,0,0,0.5);
-            transition: background 0.15s ease, border-color 0.15s ease;
-        }
-        .mcp-btn:hover { border-color: #666; background: linear-gradient(to bottom, #303030, #1c1c1c); }
-        .mcp-btn:active { background: #111; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8); }
+    .btn{position:absolute;box-sizing:border-box;border-radius:6px;
+        background:linear-gradient(#34363a,#151618 60%,#0d0d0e);border:2px solid #050505;
+        box-shadow:inset 0 1px 1px rgba(255,255,255,.28),0 0 0 2px rgba(0,0,0,.35),0 3px 6px rgba(0,0,0,.65);cursor:pointer}
+    .btn:active{transform:translateY(2px);box-shadow:inset 0 2px 5px #000,0 0 0 2px rgba(0,0,0,.35)}
+    .btn .bt{position:absolute;top:13px;left:0;right:0;text-align:center;font-weight:bold;font-size:15px;color:#f4f4f4;
+        letter-spacing:-.3px;white-space:nowrap}
+    .btn .lamp{position:absolute;left:50%;bottom:13px;width:44px;height:12px;margin-left:-22px;border-radius:1px;
+        background-color:#173617;background-image:conic-gradient(#28522a 25%,#0d210e 0 50%,#28522a 0 75%,#0d210e 0);
+        background-size:4px 4px;box-shadow:inset 0 0 2px #000}
+    .btn.on .lamp{background-color:#2eea3c;
+        background-image:conic-gradient(#5aff62 25%,#17a824 0 50%,#5aff62 0 75%,#17a824 0);
+        box-shadow:0 0 9px 2px rgba(60,255,70,.65)}
+    /* flat (747/777 style): legend lights up */
+    .btn.flat{background:linear-gradient(#2a2b2e,#111214);border-radius:4px}
+    .btn.flat .bt{top:50%;transform:translateY(-50%);font-size:13px;letter-spacing:0;color:#e9e9e9}
+    .btn.flat .lamp{display:none}
+    .btn.flat.on .bt{color:#72ff82;text-shadow:0 0 7px #2dff45}
+    .btn.flat.on{box-shadow:inset 0 0 9px rgba(60,255,80,.38),0 0 0 2px rgba(0,0,0,.35),0 3px 6px rgba(0,0,0,.65)}
+    /* airbus FCU style: green bar on top */
+    .btn.ab{background:linear-gradient(#2c2e31,#101112);border-radius:4px}
+    .btn.ab .bt{top:60%;transform:translateY(-50%);font-size:13px;letter-spacing:0}
+    .btn.ab .lamp{top:5px;bottom:auto;width:30px;height:5px;margin-left:-15px;background:#17331a;background-image:none}
+    .btn.ab.on .lamp{background:#58ff62;box-shadow:0 0 8px 2px rgba(80,255,90,.7)}
 
-        .mcp-btn.active {
-            background: linear-gradient(to bottom, #1e5229, #113318) !important;
-            border-color: #388e3c !important;
-            color: #ffffff !important;
-            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7) !important;
-            text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-        }
+    .disp.blue{background:linear-gradient(#08122a,#0c1a3c);border:2px solid #2a3858}
+    .disp.sm{gap:3px;border-radius:3px}
+    .disp.sm .dg{width:11px;height:16px}
+    .disp.dsm .dr span{font-size:16px}
+    .btn.cc{border-radius:3px}
+    .btn.cc .bt{font-size:10px;line-height:1.05;white-space:normal;padding:0 1px}
+    .btn.cc.flat.on .bt{color:#ffb340;text-shadow:0 0 6px #ff9a00}
+    .btn.sm .bt{font-size:10px}
+    .tsw{position:absolute;box-sizing:border-box;border:2px solid #8b8e92;border-radius:3px;overflow:hidden;cursor:pointer;
+        background:linear-gradient(90deg,#1b1c1e,#2a2b2e,#1b1c1e)}
+    .tsw .lv{position:absolute;left:3px;right:3px;height:46%;top:50%;border-radius:2px;transition:top .12s;
+        background:linear-gradient(#ececec,#9a9c9e)}
+    .tsw.on .lv,.tsw.fd .lv{top:4px}
+    .tsw.fd.off .lv{top:50%}
+    .tsw.on::after{content:'';position:absolute;left:0;right:0;bottom:3px;height:4px;background:#5dff6a;box-shadow:0 0 6px #5dff6a}
+    .afs{position:absolute;box-sizing:border-box;border-radius:3px;cursor:pointer;border:2px solid #555;
+        background:linear-gradient(#f4f1e6,#bfb9a6);box-shadow:0 2px 4px rgba(0,0,0,.6)}
+    .afs.on{background:linear-gradient(#c4ffca,#46d058);box-shadow:0 0 8px rgba(60,255,80,.6)}
+    .afbox{position:absolute;box-sizing:border-box;display:flex;align-items:center;justify-content:center;font-weight:bold;
+        font-size:14px;color:#fff;letter-spacing:.5px;background:linear-gradient(#17181a,#0c0c0d);border:2px solid #6b6e72;border-radius:3px}
+    .rbtn{position:absolute;box-sizing:border-box;border-radius:50%;
+        background:radial-gradient(circle at 50% 40%,#2c2c2e,#050505 70%);border:3px solid #8b8d90;
+        box-shadow:inset 0 0 6px #000,0 0 0 2px rgba(0,0,0,.4);cursor:pointer}
+    .rbtn:active{transform:translateY(1px);background:#000}
 
-        .mcp-btn.set-btn {
-            width: 85px; background: linear-gradient(to bottom, #2a2a2a, #181818); border-color: #444444; color: #ffb86c; font-size: 11px;
-            display: flex; align-items: center; justify-content: center; gap: 6px;
-        }
-        .mcp-btn.set-btn.active {
-            background: linear-gradient(to bottom, #1e5229, #113318) !important; border-color: #388e3c !important; color: #ffffff !important;
-            box-shadow: inset 0 2px 5px rgba(0,0,0,0.7); text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-        }
-        .indicator { width: 5px; height: 11px; background: #333333; border-radius: 2px; box-shadow: inset 0 1px 2px rgba(0,0,0,0.6); }
-        .mcp-btn.set-btn.active .indicator { background: #00e676; box-shadow: 0 0 6px #00e676, inset 0 1px 2px rgba(0,0,0,0.3); }
+    .knob{position:absolute;cursor:pointer;touch-action:none}
+    .knob svg{width:100%;height:100%;overflow:visible;display:block}
+    .rot{transform-origin:50px 50px;transition:transform .08s ease-out}
 
-        .mcp-dial-wrapper {
-            width: 48px; height: 48px; margin: 6px auto; position: relative; cursor: pointer; touch-action: none;
-        }
-        .mcp-dial {
-            width: 100%; height: 100%;
-            background-image: ${dialBgCSS};
-            background-size: contain; background-position: center center; background-repeat: no-repeat;
-            border: none; box-shadow: none;
-            border-radius: 50%; position: relative; pointer-events: none;
-            transition: transform 0.08s ease-out; box-sizing: border-box;
-        }
+    .vsw{position:absolute;box-sizing:border-box;border-radius:28px;background:#0c0c0d;border:3px solid #2a2a2c;
+        box-shadow:inset 0 0 8px #000,0 0 0 2px rgba(0,0,0,.4);cursor:ns-resize;display:flex;align-items:center;justify-content:center}
+    .vsw .wh{position:relative;border-radius:9px;overflow:hidden;
+        background:repeating-linear-gradient(to bottom,#f6f6f3 0 4px,#b4b4af 4px 7px);box-shadow:0 0 4px #000}
+    .vsw .wh::after{content:'';position:absolute;inset:0;
+        background:linear-gradient(to bottom,rgba(0,0,0,.62),rgba(0,0,0,0) 28%,rgba(0,0,0,0) 72%,rgba(0,0,0,.62)),
+                   linear-gradient(to right,rgba(0,0,0,.25),rgba(255,255,255,.12) 50%,rgba(0,0,0,.25))}
 
-        .mcp-toggle-tab {
-            position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); z-index: 999998;
-            background: var(--mcp-border, #0a0a0a); color: #ff9933; border: 2px solid var(--mcp-bg-main, #141414); border-bottom: none;
-            padding: 6px 20px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: monospace;
-            font-weight: bold; font-size: 12px; box-shadow: 0 -4px 10px rgba(0,0,0,0.5);
-            transition: background 0.4s ease, border-color 0.4s ease;
-        }
+    .fdsw{position:absolute;box-sizing:border-box;border:2px solid var(--txt);border-radius:4px;background:#1a1a1b;cursor:pointer}
+    .fdsw .lv{position:absolute;left:3px;right:3px;top:2px;height:20px;border-radius:3px;transition:top .1s;
+        background:linear-gradient(90deg,#8e9092,#ececec,#85878a)}
+    .fdsw.off .lv{top:21px}
+    .rsw{position:absolute;box-sizing:border-box;border:2px solid var(--txt);border-radius:50%;cursor:pointer;
+        background:radial-gradient(#2a2b2e,#0c0c0d)}
+    .rsw .lv{position:absolute;left:14px;top:5px;width:10px;height:22px;border-radius:5px;transform-origin:50% 100%;
+        transform:rotate(-28deg);transition:transform .12s;background:linear-gradient(90deg,#8c8f93,#ececec,#8c8f93)}
+    .rsw.off .lv{transform:rotate(28deg)}
+
+    .atsw{position:absolute;cursor:pointer}
+    .atsw svg{width:100%;height:100%;display:block;overflow:visible}
+    #at-lever{transform-origin:45px 45px;transition:transform .14s ease-out}
+    #at-led{position:absolute;box-sizing:border-box;border-radius:3px;background:#17351a;border:1px solid #0a1a0c;
+        box-shadow:inset 0 1px 2px #000}
+    #at-led.on{background:#52ff44;box-shadow:0 0 9px 2px rgba(80,255,70,.7)}
+
+    .ma{position:absolute;box-sizing:border-box;border-radius:50%;background:radial-gradient(circle at 40% 35%,#1d3a1d,#071007);
+        border:2px solid #0a0a0a;color:#2c8a2c;font-weight:bold;font-size:13px;display:flex;align-items:center;
+        justify-content:center;box-shadow:inset 0 0 4px #000}
+    .ma.on{background:radial-gradient(circle at 40% 35%,#3dff3d,#128c12);color:#031a03;box-shadow:0 0 10px 2px rgba(60,255,60,.6)}
+
+    .disengage{position:absolute;box-sizing:border-box;border:3px solid var(--txt);border-radius:10px 10px 0 0;cursor:pointer}
+    .disengage .bar{position:absolute;left:6px;right:6px;top:10px;bottom:-4px;border-radius:4px 4px 0 0;
+        background:linear-gradient(#bfc2bf,#8d908d);box-shadow:inset 0 2px 3px rgba(255,255,255,.5),inset 0 -3px 6px rgba(0,0,0,.35)}
+    .disengage.press .bar{filter:brightness(.85)}
+    .disengage .tt{position:absolute;left:50%;top:-12px;transform:translateX(-50%);padding:0 8px;font-weight:bold;
+        font-size:16px;color:var(--txt);background:var(--bg);white-space:nowrap}
+    .disengage.alert .bar{background:linear-gradient(#ff9a8f,#d9382b)}
+    .disengage.plain{border:none;border-radius:0}
+    .disengage.plain .tt{top:-24px;background:none;padding:0;font-size:15px}
+    .disengage.plain .bar{left:0;right:0;top:0;border-radius:2px 2px 0 0;background:linear-gradient(#f6f0de,#cdc5ae)}
+    .disengage.plain.alert .bar{background:linear-gradient(#ff9a8f,#d9382b)}
+
+    .mcp-toggle-tab{position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:999998;
+        --bg:#575b5f;--border:#26282a;--txt:#f3f3f3;
+        background:var(--border);color:var(--txt);border:2px solid var(--bg);border-bottom:none;padding:6px 20px;
+        border-radius:6px 6px 0 0;cursor:pointer;font-family:monospace;font-weight:bold;font-size:12px;
+        box-shadow:0 -4px 10px rgba(0,0,0,.5);transition:background .4s,border-color .4s}
     `;
     document.head.appendChild(style);
 
-    const mcpHTML = `
-        <div id="geofs-mcp-container">
-            <div class="mcp-section" style="width: 65px;">
-                <div class="mcp-label">F/D / A/T</div>
-                <div class="mcp-btn" id="btn-at" style="width:100%; margin-bottom:4px;">A/T ARM</div>
-                <div class="mcp-btn" id="btn-thr" style="width:100%; margin-bottom:4px;">THR</div>
-                <div class="mcp-btn" id="btn-spd" style="width:100%;">SPD</div>
-            </div>
+    // ------------------------------------------------------- 7-segment digits
+    const SEGS = {
+        a: 'M3.5,1.5 L5.5,0 L14.5,0 L16.5,1.5 L14.5,3 L5.5,3Z',
+        g: 'M3.5,16.5 L5.5,15 L14.5,15 L16.5,16.5 L14.5,18 L5.5,18Z',
+        d: 'M3.5,31.5 L5.5,30 L14.5,30 L16.5,31.5 L14.5,33 L5.5,33Z',
+        f: 'M1.5,2.5 L3,4 L3,13.5 L1.5,15 L0,13.5 L0,4Z',
+        b: 'M18.5,2.5 L20,4 L20,13.5 L18.5,15 L17,13.5 L17,4Z',
+        e: 'M1.5,18 L3,19.5 L3,29 L1.5,30.5 L0,29 L0,19.5Z',
+        c: 'M18.5,18 L20,19.5 L20,29 L18.5,30.5 L17,29 L17,19.5Z'
+    };
+    const MAP = { '0': 'abcdef', '1': 'bc', '2': 'abdeg', '3': 'abcdg', '4': 'bcfg', '5': 'acdfg', '6': 'acdefg',
+                  '7': 'abc', '8': 'abcdefg', '9': 'abcdfg', '-': 'g', ' ': '' };
+    function digit(ch) {
+        let inner;
+        if (ch === '+') {
+            inner = Object.keys(SEGS).map(k => `<path class="off" d="${SEGS[k]}"/>`).join('') +
+                '<rect class="on" x="8.5" y="9" width="3" height="15"/><rect class="on" x="4" y="15" width="12" height="3"/>';
+        } else {
+            const lit = MAP[ch] || '';
+            inner = Object.keys(SEGS).map(k => `<path class="${lit.includes(k) ? 'on' : 'off'}" d="${SEGS[k]}"/>`).join('');
+        }
+        return `<svg class="dg" viewBox="0 0 22 33"><g transform="translate(3,0) skewX(-6)">${inner}</g></svg>`;
+    }
 
-            <div class="mcp-section">
-                <div class="mcp-label">IAS / MACH</div>
-                <div class="mcp-screen-box" id="box-ias">
-                    <div class="drum-strip" id="drum-ias">
-                        <div class="drum-digit">249</div>
-                        <div class="drum-digit">250</div>
-                        <div class="drum-digit">251</div>
-                    </div>
-                </div>
-                <div class="mcp-dial-wrapper" id="wrap-ias"><div class="mcp-dial" id="dial-ias"></div></div>
-                <div class="mcp-btn set-btn" id="set-ias"><div class="indicator"></div>SET</div>
-                <div style="margin-top: 4px;">
-                    <div class="mcp-btn" id="btn-lnav" style="width: 39px;">L NAV</div>
-                    <div class="mcp-btn" id="btn-vnav" style="width: 39px;">V NAV</div>
-                </div>
-            </div>
+    // ------------------------------------------------------- builders/helpers
+    const ctr = (cx, cy, w, h) => `left:${cx - w / 2}px;top:${cy - h / 2}px;width:${w}px;height:${h}px;`;
+    const lab = (t, x, y, cls = '') => `<div class="lab ${cls}" style="left:${x}px;top:${y}px">${t}</div>`;
+    const btn = (id, label, cx, cy, w = 66, h = 66, cls = '') =>
+        `<div class="btn ${cls}" id="${id}" style="${ctr(cx, cy, w, h)}"><span class="bt">${label}</span><i class="lamp"></i></div>`;
+    const disp = (id, cx, cy, w, h, cls = '') => `<div class="disp ${cls}" id="${id}" style="${ctr(cx, cy, w, h)}"></div>`;
+    const knob = (id, cx, cy, d, svg) => `<div class="knob" id="${id}" style="${ctr(cx, cy, d, d)}">${svg}</div>`;
+    const rbtn = (id, cx, cy, d = 44) => `<div class="rbtn" id="${id}" style="${ctr(cx, cy, d, d)}"></div>`;
+    const vsw = (cx, cy, w, h) =>
+        `<div class="vsw" id="wrap-vs" style="${ctr(cx, cy, w, h)}"><div class="wh" id="vs-wheel" style="width:${w - 16}px;height:${h - 18}px"></div></div>`;
 
-            <div class="mcp-section">
-                <div class="mcp-label">HDG SELECT</div>
-                <div class="mcp-screen-box" id="box-hdg">
-                    <div class="drum-strip" id="drum-hdg">
-                        <div class="drum-digit">269</div>
-                        <div class="drum-digit">270</div>
-                        <div class="drum-digit">271</div>
-                    </div>
-                </div>
-                <div class="mcp-dial-wrapper" id="wrap-hdg"><div class="mcp-dial" id="dial-hdg"></div></div>
-                <div class="mcp-btn set-btn" id="set-hdg"><div class="indicator"></div>SET</div>
-                <div style="margin-top: 4px;">
-                    <div class="mcp-btn" id="btn-hdghold" style="width: 85px;">HDG HOLD</div>
-                </div>
-            </div>
+    const arc = (cx, cy, r, a0, a1) => {
+        const p = a => [cx + r * Math.sin(a * Math.PI / 180), cy - r * Math.cos(a * Math.PI / 180)];
+        const [x0, y0] = p(a0), [x1, y1] = p(a1);
+        return `<path class="ln" d="M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 0 ${a1 > a0 ? 1 : 0} ${x1.toFixed(1)},${y1.toFixed(1)}"/>`;
+    };
+    const ticks = (cx, cy, angles, r0, r1) => angles.map(a => {
+        const s = Math.sin(a * Math.PI / 180), c = Math.cos(a * Math.PI / 180);
+        return `<path class="ln" d="M${(cx + r0 * s).toFixed(1)},${(cy - r0 * c).toFixed(1)} L${(cx + r1 * s).toFixed(1)},${(cy - r1 * c).toFixed(1)}"/>`;
+    }).join('');
+    const screw = (x, y, r = 12) =>
+        `<g transform="translate(${x},${y}) rotate(${(x * 7 + y * 3) % 90})"><circle r="${r}" fill="url(#scr)" stroke="#262626" stroke-width="1.5"/>` +
+        `<rect x="${-r * .65}" y="-1.6" width="${r * 1.3}" height="3.2" fill="#2b2b2b"/>` +
+        `<rect x="-1.6" y="${-r * .65}" width="3.2" height="${r * 1.3}" fill="#2b2b2b"/></g>`;
+    const plus = (x, y) => `<path class="ln" style="stroke-width:2;opacity:.55" d="M${x - 6},${y} H${x + 6} M${x},${y - 6} V${y + 6}"/>`;
+    const svgWrap = (w, h, inner) =>
+        `<svg class="mcp-static" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><radialGradient id="scr" cx="35%" cy="30%" r="80%">` +
+        `<stop offset="0" stop-color="#d8d8d8"/><stop offset="1" stop-color="#6e6e70"/></radialGradient></defs>${inner}</svg>`;
 
-            <div class="mcp-section">
-                <div class="mcp-label">VERT SPD</div>
-                <div class="mcp-screen-box" id="box-vs">
-                    <div class="drum-strip" id="drum-vs">
-                        <div class="drum-digit">-100</div>
-                        <div class="drum-digit">0</div>
-                        <div class="drum-digit">100</div>
-                    </div>
-                </div>
-                <div class="mcp-dial-wrapper" id="wrap-vs"><div class="mcp-dial" id="dial-vs"></div></div>
-                <div class="mcp-btn set-btn" id="set-vs"><div class="indicator"></div>SET</div>
-                <div style="margin-top: 4px;">
-                    <div class="mcp-btn" id="btn-vshold" style="width: 85px;">V/S HOLD</div>
-                </div>
-            </div>
+    // ---- knob artwork (viewBox 100x100, drawn from scratch)
+    let lobes = '';
+    for (let i = 0; i < 8; i++) {
+        const a = i * 45 * Math.PI / 180;
+        lobes += `<circle cx="${(50 + 30 * Math.sin(a)).toFixed(1)}" cy="${(50 - 30 * Math.cos(a)).toFixed(1)}" r="10" fill="url(#gSp)" stroke="#3a3a3c" stroke-width=".9"/>`;
+    }
+    const svgSpeed = `<svg viewBox="0 0 100 100"><defs>
+        <radialGradient id="gSp" cx="38%" cy="32%" r="75%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
+        <circle cx="50" cy="50" r="47" fill="#1b1b1d" stroke="#dcdcdc" stroke-width="3"/>
+        <g id="dial-ias" class="rot">${lobes}<circle cx="50" cy="50" r="27" fill="url(#gSp)" stroke="#3a3a3c" stroke-width=".9"/></g>
+        <circle cx="42" cy="40" r="14" fill="#fff" opacity=".10"/></svg>`;
 
-            <div class="mcp-section">
-                <div class="mcp-label">ALTITUDE</div>
-                <div class="mcp-screen-box" id="box-alt">
-                    <div class="drum-strip" id="drum-alt">
-                        <div class="drum-digit">4900</div>
-                        <div class="drum-digit">5000</div>
-                        <div class="drum-digit">5100</div>
-                    </div>
-                </div>
-                <div class="mcp-dial-wrapper" id="wrap-alt"><div class="mcp-dial" id="dial-alt"></div></div>
-                <div class="mcp-btn set-btn" id="set-alt"><div class="indicator"></div>SET</div>
-                <div style="margin-top: 4px;">
-                    <div class="mcp-btn" id="btn-althold" style="width: 85px;">ALT HOLD</div>
-                </div>
-            </div>
+    const crsKnurl = (() => { let s = ''; for (let a = 0; a < 360; a += 12) s += `<line x1="50" y1="3" x2="50" y2="9" transform="rotate(${a} 50 50)"/>`; return s; })();
+    const svgCourse = id => `<svg viewBox="0 0 100 100"><defs>
+        <radialGradient id="gCr${id}" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#dcdcdc"/><stop offset="1" stop-color="#6c6e70"/></radialGradient></defs>
+        <g id="dial-${id}" class="rot"><circle cx="50" cy="50" r="47" fill="#8e9092" stroke="#4b4d4f" stroke-width="2"/>
+        <g stroke="#505254" stroke-width="1.6">${crsKnurl}</g>
+        <circle cx="50" cy="50" r="38" fill="url(#gCr${id})" stroke="#55575a" stroke-width="1.2"/>
+        <rect x="22" y="46.5" width="56" height="7" rx="3.5" fill="#e6a02a"/><rect x="46.5" y="22" width="7" height="56" rx="3.5" fill="#e6a02a"/>
+        <rect x="22" y="46.5" width="56" height="3" rx="1.5" fill="#fff" opacity=".25"/></g></svg>`;
 
-            <div class="mcp-section" style="float: right; margin-right: 0;">
-                <div class="mcp-label">A/P ENGAGE</div>
-                <div style="margin-bottom: 5px;">
-                    <div class="mcp-btn" id="btn-cmd" style="background: linear-gradient(to bottom, #2e7d32, #1b5e20); border-color: #4caf50; color: #fff; width: 100%; padding: 8px;">ENGAGE ALL</div>
-                </div>
-                <div>
-                    <div class="mcp-btn" style="width: 39px;">APP</div>
-                    <div class="mcp-btn" style="width: 39px;">LOC</div>
-                </div>
-            </div>
-        </div>
-        <div id="geofs-mcp-tab" class="mcp-toggle-tab">🎛️ MCP PANEL</div>
-    `;
+    // heading knob with bank-limit pointer. sel=true -> dark cap with SEL (747/777)
+    const svgHdg = sel => `<svg viewBox="0 0 100 100"><defs>
+        <radialGradient id="gBk" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#a9abad"/><stop offset="1" stop-color="#4a4c4f"/></radialGradient>
+        <radialGradient id="gHd" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="${sel ? '#3d4045' : '#c2c4c6'}"/><stop offset="1" stop-color="${sel ? '#101113' : '#5d5f62'}"/></radialGradient></defs>
+        <g id="dial-bank" class="rot"><circle cx="50" cy="50" r="45" fill="url(#gBk)" stroke="#2c2d2f" stroke-width="2"/>
+        <line x1="50" y1="52" x2="50" y2="4" stroke="#fff" stroke-width="7" stroke-linecap="round"/></g>
+        <g id="dial-hdg" class="rot"><circle cx="50" cy="50" r="${sel ? 27 : 23}" fill="url(#gHd)" stroke="${sel ? '#8b8d90' : '#2c2d2f'}" stroke-width="1.5"/>
+        ${sel ? '' : '<line x1="50" y1="50" x2="50" y2="32" stroke="#222" stroke-width="3" stroke-linecap="round"/>'}</g>
+        ${sel ? '<text x="50" y="57" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="19" fill="#f4f4f4">SEL</text>' : ''}</svg>`;
 
-    document.body.insertAdjacentHTML('beforeend', mcpHTML);
+    const altKnurl = (() => { let s = ''; for (let a = 0; a < 360; a += 10) s += `<line x1="50" y1="4" x2="50" y2="10" transform="rotate(${a} 50 50)"/>`; return s; })();
+    const svgAlt = `<svg viewBox="0 0 100 100"><defs>
+        <radialGradient id="gAl" cx="38%" cy="30%" r="80%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
+        <g id="dial-alt" class="rot"><circle cx="50" cy="50" r="47" fill="url(#gAl)" stroke="#2a2b2d" stroke-width="2"/>
+        <g stroke="#2a2b2d" stroke-width="1.4" opacity=".8">${altKnurl}</g>
+        <circle cx="50" cy="50" r="36" fill="none" stroke="#fff" stroke-width="1" opacity=".18"/>
+        <rect x="47" y="12" width="6" height="14" rx="3" fill="#202022"/></g></svg>`;
 
-    const container = document.getElementById('geofs-mcp-container');
-    const tab = document.getElementById('geofs-mcp-tab');
+    // airbus FCU knobs
+    const fcuKnurl = (() => { let s = ''; for (let a = 0; a < 360; a += 15) s += `<line x1="50" y1="10" x2="50" y2="17" transform="rotate(${a} 50 50)"/>`; return s; })();
+    const svgRound = (id, dark, tri) => `<svg viewBox="0 0 100 100"><defs>
+        <radialGradient id="gR${id}" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="${dark ? '#4a4e54' : '#e3e6ea'}"/><stop offset="1" stop-color="${dark ? '#16181a' : '#80878f'}"/></radialGradient></defs>
+        <circle cx="50" cy="50" r="47" fill="#101214" stroke="#6b7178" stroke-width="2"/>
+        <g id="dial-${id}" class="rot"><circle cx="50" cy="50" r="40" fill="url(#gR${id})" stroke="#2a2d31" stroke-width="1.5"/>
+        <g stroke="rgba(0,0,0,.35)" stroke-width="1.5">${fcuKnurl}</g>
+        ${tri ? '<path d="M37,42 H63 L50,65Z" fill="none" stroke="#5a6bb8" stroke-width="3" stroke-linejoin="round"/>' : ''}
+        <circle cx="50" cy="50" r="29" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="1"/>
+        <rect x="48" y="12" width="4" height="9" rx="2" fill="${dark ? '#d8dce0' : '#222'}"/></g></svg>`;
 
-    tab.addEventListener('click', () => {
-        container.style.display = container.style.display === 'block' ? 'none' : 'block';
-    });
+    const svgAT = grey => `<svg viewBox="0 0 90 90"><defs>
+        <linearGradient id="gLv" x1="0" x2="1"><stop offset="0" stop-color="${grey ? '#76797d' : '#8d1414'}"/><stop offset=".5" stop-color="${grey ? '#eeeeee' : '#ff4a3d'}"/><stop offset="1" stop-color="${grey ? '#76797d' : '#8d1414'}"/></linearGradient></defs>
+        <circle cx="45" cy="45" r="41" fill="#1b1b1c" stroke="var(--txt)" stroke-width="${grey ? 0 : 3.5}"/>
+        <circle cx="45" cy="45" r="25" fill="#3b3c3e" stroke="#0c0c0c" stroke-width="2"/>
+        <g id="at-lever"><rect x="39.5" y="2" width="11" height="44" rx="5.5" fill="url(#gLv)" stroke="#2a0606" stroke-width="1"/>
+        <rect x="39.5" y="2" width="11" height="10" rx="5" fill="#f1f1f1"/></g>
+        <circle cx="45" cy="45" r="9" fill="#9a9c9e" stroke="#222" stroke-width="1.5"/></svg>`;
 
-    // --- DRAGGABLE INTERFACE IMPLEMENTATION ---
-    let isDraggingPanel = false;
-    let dragStartX = 0, dragStartY = 0;
+    // ===================================================== LAYOUT: 737 style
+    function build737() {
+        const st = svgWrap(1592, 253, `
+            ${screw(24, 24)}${screw(1568, 24)}${screw(24, 229)}${screw(1568, 229)}
+            ${plus(20, 96)}${plus(316, 104)}${plus(1080, 154)}${plus(1574, 96)}
+            ${arc(97, 125, 50, -72, -38)}${arc(97, 125, 50, 38, 72)}
+            ${arc(1510, 127, 50, -72, -38)}${arc(1510, 127, 50, 38, 72)}
+            ${arc(888, 125, 48, -70, -36)}${arc(888, 125, 48, 36, 70)}
+            <path class="ln" d="M428,112 V86 M428,86 H400 V106"/>
+            <path class="ln" d="M404,176 L356,194 M452,176 L500,194"/>
+            ${ticks(650, 128, [-55, -27.5, 0, 27.5, 55], 39, 51)}
+            <path class="ln" d="M1052,213 H1102"/>
+            <path class="ln" d="M1176,134 V198 M1170,142 L1176,134 L1182,142 M1170,190 L1176,198 L1182,190"/>
+            <path class="ln" d="M1248,30 V20 Q1248,17 1251,17 H1278 M1378,17 H1405 Q1408,17 1408,20 V30"/>
+            <circle cx="1065" cy="101" r="11" fill="#0d0d0e" opacity=".55" stroke="var(--border)" stroke-width="1.5"/>`);
+        const labels = [
+            lab('COURSE', 130, 14), lab('IAS/MACH', 385, 14), lab('HEADING', 650, 14), lab('ALTITUDE', 915, 14),
+            lab('VERT SPEED', 1125, 14), lab('COURSE', 1475, 14),
+            lab('A/T<br>ARM', 240, 26, 'sm'), lab('OFF', 238, 142, 'sm'),
+            lab('C/O', 352, 90, 'sm'), lab('SPD<br>INTV', 549, 143, 'sm'), lab('ALT<br>INTV', 1033, 143, 'sm'),
+            lab('10', 604, 90, 'sm'), lab('30', 718, 90, 'sm'),
+            lab('DN', 1176, 118, 'sm'), lab('UP', 1176, 214, 'sm'),
+            lab('A/P ENGAGE', 1328, 17, 'sm'), lab('A', 1262, 26, 'sm'), lab('B', 1394, 26, 'sm'),
+            lab('F/D', 172, 150, 'sm'), lab('ON', 172, 166, 'sm'), lab('OFF', 172, 234, 'sm'),
+            lab('F/D', 1437, 150, 'sm'), lab('ON', 1437, 166, 'sm'), lab('OFF', 1437, 234, 'sm')
+        ].join('');
+        return `${st}${labels}
+        ${disp('disp-crsL', 130, 50, 106, 44)}
+        ${knob('wrap-crsL', 97, 125, 80, svgCourse('crsL'))}
+        <div class="ma" id="ma-L" style="${ctr(169, 103, 24, 24)}">MA</div>
+        <div class="fdsw" id="fd-L" style="${ctr(172, 200, 32, 46)}"><i class="lv"></i></div>
+        <div id="at-led" style="${ctr(240, 47, 26, 8)}"></div>
+        <div class="atsw" id="atsw" style="${ctr(238, 96, 88, 88)}">${svgAT(false)}</div>
+        ${disp('disp-ias', 386, 49, 182, 44)}
+        ${rbtn('btn-co', 352, 128)}${rbtn('btn-spdintv', 497, 128)}
+        ${knob('wrap-ias', 428, 152, 88, svgSpeed)}
+        ${btn('btn-n1', 'N1', 234, 203, 70, 66)}${btn('btn-speed', 'SPEED', 312, 203, 70, 66)}
+        ${btn('btn-lvlchg', 'LVL CHG', 542, 203, 70, 66)}${btn('btn-vnav', 'V NAV', 541, 41, 68, 66)}
+        ${disp('disp-hdg', 655, 48, 112, 44)}
+        ${knob('wrap-hdg', 650, 128, 66, svgHdg(false))}
+        ${btn('btn-hdgsel', 'HDG SEL', 655, 203, 70, 66)}
+        ${btn('btn-lnav', 'L NAV', 765, 42, 66, 64)}${btn('btn-vorloc', 'VOR LOC', 765, 125, 66, 64)}${btn('btn-app', 'APP', 765, 202, 66, 64)}
+        ${disp('disp-alt', 914, 48, 186, 44)}
+        ${knob('wrap-alt', 888, 125, 74, svgAlt)}
+        ${rbtn('btn-altintv', 990, 128)}
+        ${btn('btn-althld', 'ALT HLD', 888, 203, 70, 66)}${btn('btn-vs', 'V/S', 1004, 203, 66, 66)}
+        ${disp('disp-vs', 1122, 49, 168, 44)}
+        ${vsw(1130, 168, 60, 110)}
+        ${btn('btn-cmda', 'CMD', 1281, 65, 62, 60)}${btn('btn-cmdb', 'CMD', 1366, 65, 62, 60)}
+        ${btn('btn-cwsa', 'CWS', 1281, 141, 62, 60)}${btn('btn-cwsb', 'CWS', 1366, 141, 62, 60)}
+        <div class="disengage" id="btn-disengage" style="left:1208px;top:196px;width:214px;height:70px"><span class="tt">DISENGAGE</span><div class="bar"></div></div>
+        ${disp('disp-crsR', 1487, 50, 106, 44)}
+        ${knob('wrap-crsR', 1510, 127, 80, svgCourse('crsR'))}
+        <div class="ma" id="ma-R" style="${ctr(1436, 103, 24, 24)}">MA</div>
+        <div class="fdsw" id="fd-R" style="${ctr(1438, 200, 32, 46)}"><i class="lv"></i></div>`;
+    }
 
-    container.addEventListener('mousedown', (e) => {
-        if (e.target.closest('.mcp-btn, .mcp-screen-box, .mcp-dial-wrapper')) return;
-        isDraggingPanel = true;
-        dragStartX = e.clientX - container.offsetLeft;
-        dragStartY = e.clientY - container.offsetTop;
-        e.preventDefault();
-    });
+    // ============================ LAYOUT: 747 / 757 / 767 / 777 / 787 style
+    function build747() {
+        const st = svgWrap(1480, 266, `
+            ${ticks(492, 122, [-60, -30, 0, 30, 60], 43, 54)}
+            <path class="ln" d="M248,132 V70 M205,104 L238,72"/>
+            <path class="ln" d="M203,192 L170,198 M293,190 L334,197 M290,160 L334,120"/>
+            <path class="ln" d="M938,70 V82 M697,70 V94"/>
+            <path class="ln" d="M672,102 V94 H722 V102 M672,238 V246 H722 V238"/>
+            <path class="ln" d="M645,154 V130 M639,138 L645,130 L651,138 M645,178 V202 M639,194 L645,202 L651,194 M639,166 H651"/>
+            <path class="ln" d="M724,184 H748"/>
+            <path class="ln" d="M1143,34 V22 H1205 M1305,22 H1368 V34"/>`);
+        const labels = [
+            lab('IAS/MACH', 250, 13, 'sm'), lab('HDG', 490, 13, 'sm'), lab('VERT SPD', 697, 13, 'sm'), lab('ALT', 930, 13, 'sm'),
+            lab('A/T ARM', 138, 13, 'sm'), lab('OFF', 128, 84, 'sm'), lab('SEL', 207, 92, 'sm'),
+            lab('5', 432, 92, 'sm'), lab('25', 555, 92, 'sm'), lab('AUTO', 428, 126, 'sm'), lab('BANK<br>LIMIT', 558, 126, 'xs'),
+            lab('DN', 645, 114, 'sm'), lab('UP', 645, 214, 'sm'), lab('+', 850, 128, 'sm'),
+            lab('A/P ENGAGE', 1255, 13, 'sm'), lab('L', 1176, 32, 'xs'), lab('C', 1258, 32, 'xs'), lab('R', 1340, 32, 'xs'),
+            lab('F/D<br>ON', 42, 22, 'sm'), lab('OFF', 42, 143, 'sm'), lab('F/D<br>ON', 1420, 22, 'sm'), lab('OFF', 1425, 143, 'sm')
+        ].join('');
+        return `${st}${labels}
+        <div class="rsw" id="fd-L" style="${ctr(42, 102, 40, 40)}"><i class="lv"></i></div>
+        <div class="atsw" id="atsw" style="${ctr(128, 46, 62, 62)}">${svgAT(true)}</div>
+        ${disp('disp-ias', 250, 49, 130, 42)}
+        ${rbtn('btn-sel', 205, 122, 36)}
+        ${knob('wrap-ias', 248, 184, 100, svgSpeed)}
+        ${btn('btn-thr', 'THR', 125, 112, 54, 52, 'flat')}${btn('btn-speed', 'SPD', 125, 195, 54, 52, 'flat')}
+        ${btn('btn-lnav', 'L NAV', 360, 53, 54, 52, 'flat')}${btn('btn-vnav', 'V NAV', 360, 115, 54, 52, 'flat')}${btn('btn-flch', 'FLCH', 360, 197, 54, 52, 'flat')}
+        ${disp('disp-hdg', 490, 48, 130, 40)}
+        ${knob('wrap-hdg', 492, 124, 78, svgHdg(true))}
+        ${btn('btn-hdghold', 'HOLD', 491, 195, 54, 52, 'flat')}
+        ${disp('disp-vs', 698, 49, 178, 42)}
+        ${vsw(697, 170, 58, 136)}
+        ${btn('btn-vs', 'VS', 775, 187, 54, 52, 'flat')}
+        ${disp('disp-alt', 930, 49, 180, 42)}
+        ${knob('wrap-alt', 938, 122, 80, svgAlt)}
+        ${btn('btn-althld', 'HOLD', 938, 190, 54, 52, 'flat')}
+        ${btn('btn-loc', 'LOC', 1087, 127, 54, 52, 'flat')}${btn('btn-app', 'APP', 1087, 197, 54, 52, 'flat')}
+        ${btn('btn-cmda', 'CMD', 1173, 68, 56, 52, 'flat')}${btn('btn-cmdb', 'CMD', 1255, 68, 56, 52, 'flat')}${btn('btn-cmdc', 'CMD', 1338, 68, 56, 52, 'flat')}
+        <div class="disengage plain" id="btn-disengage" style="left:1170px;top:222px;width:188px;height:50px"><span class="tt">DISENGAGE</span><div class="bar"></div></div>
+        <div class="rsw" id="fd-R" style="${ctr(1423, 105, 40, 40)}"><i class="lv"></i></div>`;
+    }
 
-    window.addEventListener('mousemove', (e) => {
-        if (!isDraggingPanel) return;
-        container.style.transform = 'none';
-        container.style.left = (e.clientX - dragStartX) + 'px';
-        container.style.top = (e.clientY - dragStartY) + 'px';
-        container.style.bottom = 'auto';
-    });
+    // ================================================== LAYOUT: Airbus FCU
+    function buildAirbus() {
+        const st = svgWrap(810, 228, `
+            ${arc(672, 144, 55, 12, 70)}${arc(672, 144, 55, 110, 168)}
+            ${arc(500, 144, 55, -70, -30)}${arc(500, 144, 55, 30, 70)}
+            <path class="ln" style="stroke-width:1.5;opacity:.5" d="M330,84 V210 M588,84 V210"/>
+            ${plus(18, 90)}${plus(792, 90)}${plus(18, 214)}${plus(792, 214)}`);
+        const labels = [
+            lab('SPD', 52, 22, 'xs'), lab('HDG', 214, 22, 'xs'), lab('LAT', 292, 22, 'xs'),
+            lab('ALT', 428, 22, 'xs'), lab('LVL/CH', 520, 22, 'xs'), lab('V/S', 618, 22, 'xs'),
+            lab('SPD<br>MACH', 32, 104, 'xs'), lab('HDG<br>TRK', 322, 100, 'xs'), lab('V/S<br>FPA', 455, 100, 'xs'),
+            lab('100', 452, 100, 'xs'), lab('1000', 548, 100, 'xs'),
+            lab('METRIC<br>ALT', 610, 90, 'xs'), lab('UP', 718, 104, 'xs'), lab('DN', 718, 188, 'xs'),
+            lab('PUSH<br>TO<br>LEVEL<br>OFF', 770, 146, 'xs')
+        ].join('');
+        return `${st}
+        <div class="lcdp" style="left:18px;top:10px;width:312px;height:62px"></div>
+        <div class="lcdp" style="left:342px;top:10px;width:448px;height:62px"></div>
+        ${labels}
+        ${disp('disp-ias', 98, 46, 118, 40, 'lcd')}
+        ${disp('disp-hdg', 250, 46, 118, 40, 'lcd')}
+        ${disp('disp-alt', 468, 46, 170, 40, 'lcd')}
+        ${disp('disp-vs', 668, 46, 190, 40, 'lcd')}
+        ${rbtn('btn-spdmach', 72, 100, 34)}
+        ${knob('wrap-ias', 120, 150, 80, svgRound('ias', false, false))}
+        ${knob('wrap-hdg', 250, 150, 80, svgRound('hdg', false, true))}
+        ${rbtn('btn-hdgtrk', 370, 100, 34)}
+        ${btn('btn-cmda', 'AP1', 352, 150, 44, 40, 'ab')}${btn('btn-cmdb', 'AP2', 404, 150, 44, 40, 'ab')}
+        ${btn('btn-athr', 'A/THR', 378, 198, 52, 40, 'ab')}
+        ${btn('btn-loc', 'LOC', 250, 204, 54, 40, 'ab')}
+        ${knob('wrap-alt', 500, 150, 84, svgRound('alt', true, false))}
+        ${rbtn('btn-metric', 566, 100, 30)}
+        ${btn('btn-exped', 500, 204, 54, 40, 'ab')}
+        ${knob('wrap-vs', 672, 150, 80, svgRound('vs', false, false))}
+        ${btn('btn-app', 'APPR', 672, 204, 54, 40, 'ab')}`.replace("btn('btn-exped'", "btn('btn-exped'");
+    }
 
-    window.addEventListener('mouseup', () => {
-        isDraggingPanel = false;
-    });
+    // ============================================ LAYOUT: Concorde AFS panel
+    function buildConcorde() {
+        const bt = (id, l, cx, cy) => btn(id, l, cx, cy, 42, 32, 'flat cc');
+        const sw = (id, cx, cy, cls) => `<div class="tsw ${cls || ''}" id="${id}" style="${ctr(cx, cy, 34, 72)}"><i class="lv"></i></div>`;
+        const svgSlot = (id, diag) => `<svg viewBox="0 0 100 100"><defs>
+            <radialGradient id="gSl${id}" cx="38%" cy="30%" r="80%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
+            <circle cx="50" cy="50" r="47" fill="#17181a" stroke="#d0d0d0" stroke-width="3"/>
+            <g id="dial-${id}" class="rot"><circle cx="50" cy="50" r="40" fill="url(#gSl${id})" stroke="#2a2b2d" stroke-width="2"/>
+            <g transform="rotate(${diag ? -38 : 0} 50 50)"><rect x="17" y="43" width="66" height="14" rx="7" fill="#1b1c1e" stroke="#e8e8e8" stroke-width="2"/>
+            <rect x="17" y="49" width="66" height="2" fill="#e8e8e8"/></g></g></svg>`;
+        const st = svgWrap(800, 215, `
+            <path class="ln" style="stroke-width:1.5;opacity:.45" d="M190,8 V100 M440,8 V100 M8,100 H792"/>
+            ${screw(12, 12, 8)}${screw(788, 12, 8)}${screw(12, 203, 8)}${screw(788, 203, 8)}`);
+        const labels = [
+            lab('AUTOTHROTTLE', 122, 52, 'xs'), lab('KNOTS', 150, 112, 'xs'), lab('SPEED SELECT', 150, 204, 'xs'),
+            lab('AT1', 28, 204, 'xs'), lab('AT2', 82, 204, 'xs'), lab('FD1', 215, 204, 'xs'), lab('FD2', 660, 204, 'xs'),
+            lab('AP1', 410, 112, 'xs'), lab('AP2', 458, 112, 'xs'), lab('AP1', 410, 204, 'xs'), lab('AP2', 458, 204, 'xs'),
+            lab('HDG TRK<br>PULL PUSH  1', 290, 204, 'xs'), lab('VOR REF<br>LOC', 372, 204, 'xs'),
+            lab('HDG TRK<br>PULL PUSH  2', 535, 204, 'xs'), lab('VOR REF<br>LOC', 618, 204, 'xs'),
+            lab('FEET', 730, 112, 'xs'), lab('ALTITUDE SELECT', 730, 204, 'xs')
+        ].join('');
+        return `${st}${labels}
+        ${bt('btn-machhold', 'MACH<br>HOLD', 35, 32)}${bt('btn-speed', 'IAS<br>HOLD', 86, 32)}${bt('btn-iasacq', 'IAS<br>ACQ', 86, 70)}
+        ${disp('disp-ias', 150, 82, 62, 26, 'dsm')}
+        ${bt('btn-ins', 'INS', 225, 32)}${bt('btn-trkhdg', 'TRK<br>HDG', 271, 32)}
+        ${bt('btn-backbeam', 'BACK<br>BEAM', 225, 70)}${bt('btn-vorloc', 'VOR<br>LOC', 271, 70)}
+        ${bt('btn-hdghold', 'HDG<br>HOLD', 326, 32)}${bt('btn-turb', 'TURB', 378, 32)}${bt('btn-pitchhold', 'PITCH<br>HOLD', 428, 32)}
+        ${bt('btn-goaround', 'GO<br>AROUND', 378, 70)}${bt('btn-land', 'LAND', 428, 70)}
+        ${bt('btn-mach2', 'MACH<br>HOLD', 493, 32)}${bt('btn-maxclimb', 'MAX<br>CLIMB', 550, 32)}${bt('btn-ias2', 'IAS<br>HOLD', 606, 32)}${bt('btn-althld', 'ALT<br>HOLD', 662, 32)}
+        ${bt('btn-glide', 'GLIDE', 493, 70)}${bt('btn-maxcruise', 'MAX<br>CRUISE', 550, 70)}${bt('btn-vs', 'VERT<br>SPEED', 606, 70)}${bt('btn-altacq', 'ALT<br>ACQ', 662, 70)}
+        ${disp('disp-alt', 730, 82, 92, 26, 'dsm')}
+        ${sw('atsw', 28, 152)}${sw('btn-at2', 82, 152)}
+        ${knob('wrap-ias', 150, 157, 64, svgSlot('ias', false))}
+        ${sw('fd-L', 215, 152, 'fd')}${sw('fd-R', 660, 152, 'fd')}
+        ${disp('disp-hdg', 268, 128, 72, 26, 'dsm')}${disp('disp-crsL', 346, 128, 72, 26, 'dsm')}
+        ${knob('wrap-hdg', 268, 178, 36, svgRound('hdg', false, false))}${knob('wrap-crsL', 352, 178, 36, svgRound('crsL', false, false))}
+        ${sw('btn-cmda', 410, 152)}${sw('btn-cmdb', 458, 152)}
+        ${disp('disp-hdg2', 535, 128, 72, 26, 'dsm')}${disp('disp-crsR', 612, 128, 72, 26, 'dsm')}
+        ${knob('wrap-hdg2', 512, 178, 36, svgRound('hdg2', false, false))}${knob('wrap-crsR', 598, 178, 36, svgRound('crsR', false, false))}
+        ${knob('wrap-alt', 730, 160, 76, svgSlot('alt', true))}`;
+    }
 
-    // --- DYNAMIC AIRCRAFT THEME COLOR LOGIC ---
-    let currentAircraftId = null;
+    // ================================================ LAYOUT: MD-11 (and DC-10)
+    function buildMD11() {
+        const sel = (cx, cy) => `<div class="rbtn" style="${ctr(cx, cy, 16, 16)}border-width:2px"></div>`;
+        const st = svgWrap(600, 190, `
+            ${screw(12, 12, 8)}${screw(588, 12, 8)}${screw(12, 178, 8)}${screw(588, 178, 8)}
+            ${ticks(174, 112, [-120, -60, 0, 60, 120, 180], 27, 34)}
+            <path class="ln" style="stroke-width:2" d="M404,136 V146 H450 V160 M404,136 H394"/>`);
+        const labels = [
+            lab('IAS', 50, 15, 'xs'), lab('MACH', 100, 15, 'xs'), lab('HDG', 148, 15, 'xs'), lab('TRK', 198, 15, 'xs'),
+            lab('FEET', 360, 15, 'xs'), lab('METER', 424, 15, 'xs'), lab('V/S', 482, 15, 'xs'), lab('FPA', 534, 15, 'xs'),
+            lab('25', 139, 92, 'xs'), lab('AUTO', 174, 74, 'xs'), lab('5', 209, 92, 'xs'),
+            lab('10', 209, 132, 'xs'), lab('15', 174, 150, 'xs'), lab('20', 139, 132, 'xs'),
+            lab('AFS&nbsp;&nbsp;OVRD&nbsp;&nbsp;OFF', 279, 146, 'xs'), lab('1', 255, 158, 'xs'), lab('2', 303, 158, 'xs')
+        ].join('');
+        return `${st}${labels}
+        ${sel(70, 15)}${sel(174, 15)}${sel(384, 15)}${sel(506, 15)}
+        ${disp('disp-ias', 76, 56, 86, 22, 'blue sm')}
+        ${disp('disp-hdg', 172, 52, 74, 22, 'blue sm')}
+        ${disp('disp-alt', 394, 56, 92, 22, 'blue sm')}
+        ${disp('disp-vs', 506, 56, 96, 22, 'blue sm')}
+        ${btn('btn-app', 'APPR/LAND', 279, 63, 60, 20, 'flat cc')}
+        <div class="afbox" style="${ctr(279, 100, 98, 28)}">AUTO FLIGHT</div>
+        ${knob('wrap-ias', 70, 112, 46, svgSpeed)}
+        ${btn('btn-speed', 'FMS<br>SPD', 72, 170, 34, 24, 'flat cc')}
+        ${knob('wrap-hdg', 174, 112, 48, svgHdg(false))}
+        ${btn('btn-hdghold', 'NAV', 174, 170, 34, 18, 'flat cc')}
+        <div class="afs" id="btn-cmda" style="${ctr(255, 172, 46, 18)}"></div>
+        <div class="afs" id="btn-cmdb" style="${ctr(303, 172, 46, 18)}"></div>
+        ${knob('wrap-alt', 394, 112, 44, svgAlt)}
+        ${btn('btn-althld', 'PROF', 450, 170, 34, 18, 'flat cc')}
+        ${vsw(504, 112, 30, 58)}
+        ${btn('btn-vs', 'V/S', 504, 170, 34, 18, 'flat cc')}`;
+    }
 
-    // Colours approximate the real glareshield / panel paint of each cockpit family
-    const THEMES = {
-        AIRBUS:         { bg: '#4a545c', border: '#232a30' }, // Airbus blue-grey
-        BOEING_NG:      { bg: '#7c8186', border: '#3d4145' }, // 737NG light grey
-        BOEING_WIDE:    { bg: '#6b7075', border: '#33373b' }, // 777 / 787 / 747-8 mid grey
-        BOEING_BROWN:   { bg: '#75604b', border: '#2b2218' }, // 747-400 / 757 / 767 grey-brown
-        BOEING_CLASSIC: { bg: '#66705f', border: '#2a2f26' }, // 707 / 720 / 727 / early 737 grey-green
-        MD_DC:          { bg: '#6d6a62', border: '#2e2c28' }, // DC-10 / MD-11 warm grey
-        CONCORDE:       { bg: '#1c1c1d', border: '#09090a' }, // all-black flight deck
-        SOVIET_TEAL:    { bg: '#6f9a94', border: '#34524e' }, // Antonov / Ilyushin / Tupolev pale teal-green
-        SOVIET_FIGHTER: { bg: '#4f7f86', border: '#243d41' }, // Su / MiG turquoise-blue
-        MIL_DARK:       { bg: '#363b42', border: '#1a1d21' }, // F-15 / F-16 / A-10 / Hawk dark grey
-        MIL_BLACK:      { bg: '#202225', border: '#0b0c0d' }, // F-14 / SR-71 / F-22 / F-35 / Rafale
-        HELI:           { bg: '#3f4449', border: '#1c1f22' }, // helicopters / tiltrotors
-        GA_TAN:         { bg: '#8a7b66', border: '#3a3226' }, // Cessna / Piper tan panels
-        GA_GLASS:       { bg: '#2b2e33', border: '#0f1114' }, // Cirrus / Diamond / Beech glass cockpit
-        REGIONAL_GREY:  { bg: '#5d666e', border: '#2b3036' }, // ATR / CRJ / Dash 8 / Q400
-        EMBRAER:        { bg: '#3e4850', border: '#1b2126' }, // E-Jets charcoal blue-grey
-        DEFAULT:        { bg: '#141414', border: '#0a0a0a' }
+    const LAYOUTS = {
+        concorde: { name: 'concorde', drum: true, W: 800, H: 215, scale: 1.30, iasW: 3, vsStyle: 'blank', bankMin: 0, bankStep: 0, build: buildConcorde },
+        md11:     { name: 'md11', W: 600, H: 190, scale: 1.60, iasW: 3, vsStyle: 'signed', bankMin: 0, bankStep: 0, build: buildMD11 },
+        b737:   { name: 'b737',   W: 1592, H: 253, scale: 0.72, iasW: 4, vsStyle: 'signed', bankMin: -55, bankStep: 27.5, build: build737 },
+        b747:   { name: 'b747', drum: true,   W: 1480, H: 266, scale: 0.80, iasW: 3, vsStyle: 'blank',  bankMin: -60, bankStep: 30,   build: build747 },
+        airbus: { name: 'airbus', W: 810,  H: 228, scale: 1.30, iasW: 3, vsStyle: 'signed', bankMin: 0,   bankStep: 0,    build: buildAirbus }
     };
 
-    // First match wins, so specific models go before general ones
+    // ------------------------------------------------ AIRCRAFT PANEL COLOURS
+    // layout: b737 | b747 | airbus     dtype: led | drum
+    // bg/border = panel paint, txt = legend colour, disp = lit digit colour, k1/k2 = knob highlight/shadow
+    const th = o => Object.assign({ layout: 'b737', dtype: 'led', face: '#17181a' }, o);
+    const THEMES = {
+        AIRBUS:         th({ layout: 'airbus', bg: '#4f5c67', border: '#23292e', txt: '#eef2f5', disp: '#f4f4f2', k1: '#cfd3d8', k2: '#7a8189' }),
+        BOEING_NG:      th({ bg: '#575b5f', border: '#26282a', txt: '#f3f3f3', disp: '#f6f6f6', k1: '#a7a9ab', k2: '#5a5d60' }),
+        // 777 / 787 / 747-8: warm grey-beige, LED digits, green lit legends
+        BOEING_WIDE:    th({ layout: 'b747', dtype: 'led', bg: '#8c877b', border: '#2f2c27', txt: '#f5f3ee', disp: '#f7f7f4', k1: '#f2ecd8', k2: '#a8a08a' }),
+        // 747-400: brown-grey, mechanical drums
+        BOEING_BROWN:   th({ layout: 'b747', dtype: 'drum', bg: '#6d5a4a', border: '#2a2018', txt: '#ece4d8', disp: '#f2f2f2', k1: '#f1ebd8', k2: '#a69e88' }),
+        // 757 / 767: lighter tan, mechanical drums
+        BOEING_TAN:     th({ layout: 'b747', dtype: 'drum', bg: '#a48d79', border: '#3b3025', txt: '#f6f0e8', disp: '#f2f2f2', k1: '#f4eedb', k2: '#aba38c' }),
+        BOEING_CLASSIC: th({ bg: '#6a7463', border: '#2a2f26', txt: '#fbfbf4', disp: '#ff8a2a', k1: '#a3ab9b', k2: '#575f50' }),
+        MD_DC:          th({ layout: 'md11', bg: '#6a665c', border: '#2b2926', txt: '#f2efe6', disp: '#ffa530', k1: '#a8a49a', k2: '#59564e' }),
+        CONCORDE:       th({ layout: 'concorde', dtype: 'drum', bg: '#30363b', border: '#08080a', txt: '#e8e6df', disp: '#f4f1e6', k1: '#6e6e70', k2: '#2c2c2e' }),
+        SOVIET_TEAL:    th({ bg: '#8fb2a6', border: '#3a554d', txt: '#10211c', disp: '#ff6a2a', k1: '#aab8b3', k2: '#55635e' }),
+        SOVIET_FIGHTER: th({ bg: '#5b8e93', border: '#243d41', txt: '#08191b', disp: '#9dff6a', k1: '#9bb7ba', k2: '#4a6568' }),
+        MIL_DARK:       th({ bg: '#33383e', border: '#141619', txt: '#d9dde0', disp: '#7dff6a', k1: '#7d838a', k2: '#3c4147' }),
+        MIL_BLACK:      th({ bg: '#1f2124', border: '#09090a', txt: '#cdd3d6', disp: '#5dff8a', k1: '#686e73', k2: '#2a2d30' }),
+        HELI:           th({ bg: '#3b4045', border: '#1a1d20', txt: '#dfe3e6', disp: '#ffb347', k1: '#80868c', k2: '#40454a' }),
+        GA_TAN:         th({ bg: '#8d7e69', border: '#3a3226', txt: '#17120c', disp: '#ff8a2a', k1: '#b3a794', k2: '#6a5e4d' }),
+        GA_GLASS:       th({ bg: '#2a2d32', border: '#0e1013', txt: '#e6e9ec', disp: '#f3f3f3', k1: '#767b82', k2: '#363a3f' }),
+        REGIONAL_GREY:  th({ bg: '#5b646c', border: '#292e33', txt: '#f1f4f6', disp: '#ffc15a', k1: '#9ca3a9', k2: '#4f565c' }),
+        EMBRAER:        th({ bg: '#3d474f', border: '#191f24', txt: '#eaf0f3', disp: '#c8ffd9', k1: '#8b949a', k2: '#444c52' })
+    };
+    // MD-11: cool grey FCP, white knobs, small blue LCD windows
+    THEMES.MD11 = th({ layout: 'md11', bg: '#555c62', border: '#202427', txt: '#e6eaed', disp: '#f4f4f4', k1: '#e3e6ea', k2: '#80878f' });
+    THEMES.DEFAULT = THEMES.BOEING_NG;
+
     const THEME_RULES = [
         [/concorde/, 'CONCORDE'],
         [/\ban[- ]?(12[0-9]|22[0-9]|7[0-9]|2|3|26|32|148)\b|antonov|ilyushin|\bil[- ]?\d|tupolev|\btu[- ]?\d|\byak[- ]?\d/, 'SOVIET_TEAL'],
@@ -264,9 +529,11 @@
         [/a220|a318|a319|a320|a321|a330|a340|a350|a380|a400|airbus|\bbd-500/, 'AIRBUS'],
         [/747-?8|777|787|dreamliner/, 'BOEING_WIDE'],
         [/737-?(100|200)|727|720|707|\bdc-?[89]\b|\bmd-?8\d/, 'BOEING_CLASSIC'],
-        [/747|757|767/, 'BOEING_BROWN'],
+        [/757|767/, 'BOEING_TAN'],
+        [/747/, 'BOEING_BROWN'],
         [/737|boeing|\b7[0-9]7\b/, 'BOEING_NG'],
-        [/\bdc-?10|\bmd-?11|\bmd-?1[0-9]|\bmd-?9/, 'MD_DC'],
+        [/\bmd-?11/, 'MD11'],
+        [/\bdc-?10|\bmd-?1[0-9]|\bmd-?9/, 'MD_DC'],
         [/\bf-?14\b|\bf-?22\b|\bf-?35\b|\bsr-?71\b|\bb-?2\b|rafale|\bf-?117\b|\bf-?4\b|harrier|tornado|gripen|typhoon|eurofighter/, 'MIL_BLACK'],
         [/\bf-?15\b|\bf-?16\b|f\/a-?18|\bf-?18\b|\ba-?10\b|thunderbolt|mirage|\bhawk\b|\bt-?38\b|\bt-?45\b|\bc-?130\b|\bc-?17\b|\bkc-?\d+|\bb-?52\b|\bb-?1\b/, 'MIL_DARK'],
         [/helicopter|\baw\d|agusta|\bbell\b|\buh-?\d|\bch-?\d|apache|black ?hawk|robinson|\br22\b|\br44\b|eurocopter|\bec-?\d|osprey|\bv-?22\b|\bmi-?\d/, 'HELI'],
@@ -276,37 +543,195 @@
         [/cessna|piper|\bc-?1[0-9]{2}\b|\bpa-?\d|cherokee|warrior|archer|seneca|mooney|aeronca|stearman|champ|taylorcraft|\brobin/, 'GA_TAN']
     ];
 
-    function updateAircraftTheme() {
-        try {
-            if (typeof geofs === 'undefined' || !geofs.aircraft || !geofs.aircraft.instance) return;
+    // ------------------------------------------------------------ DOM setup
+    const container = document.createElement('div');
+    container.id = 'geofs-mcp-container';
+    container.innerHTML = '<div id="mcp-stage"></div>';
+    document.body.appendChild(container);
+    const stage = $('mcp-stage');
 
-            const inst = geofs.aircraft.instance;
-            const acId = inst.id;
-            const acName = (
-                (inst.aircraftRecord && inst.aircraftRecord.name) || inst.name || ''
-            ).toLowerCase();
+    const tab = document.createElement('div');
+    tab.id = 'geofs-mcp-tab';
+    tab.className = 'mcp-toggle-tab';
+    tab.textContent = '🎛️ MCP PANEL';
+    document.body.appendChild(tab);
 
-            if (acId === currentAircraftId) return;
-            currentAircraftId = acId;
+    let curTheme = null, layout = LAYOUTS.b737;
 
-            let selectedTheme = THEMES.DEFAULT;
-            for (const [regex, key] of THEME_RULES) {
-                if (regex.test(acName)) { selectedTheme = THEMES[key]; break; }
-            }
+    function updateSize() {
+        const s = layout.scale * scaleMul;
+        container.style.width = (W * s) + 'px';
+        container.style.height = (H * s) + 'px';
+        stage.style.transform = `scale(${s})`;
+    }
 
-            container.style.setProperty('--mcp-bg-main', selectedTheme.bg);
-            container.style.setProperty('--mcp-border', selectedTheme.border);
-            tab.style.setProperty('--mcp-bg-main', selectedTheme.bg);
-            tab.style.setProperty('--mcp-border', selectedTheme.border);
-        } catch (e) {
-            console.warn('[GeoFS MCP] Theme update error:', e);
+    tab.addEventListener('click', () => {
+        container.style.display = container.style.display === 'block' ? 'none' : 'block';
+    });
+
+    // Alt + scroll over the panel resizes it
+    container.addEventListener('wheel', e => {
+        if (!e.altKey) return;
+        scaleMul = Math.min(1.6, Math.max(0.5, scaleMul + (e.deltaY < 0 ? 0.05 : -0.05)));
+        updateSize();
+        e.preventDefault();
+    }, { passive: false });
+
+    // drag the panel by its background
+    let isDraggingPanel = false, dragStartX = 0, dragStartY = 0;
+    container.addEventListener('mousedown', e => {
+        if (e.target.closest('.btn,.rbtn,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.disengage')) return;
+        isDraggingPanel = true;
+        dragStartX = e.clientX - container.offsetLeft;
+        dragStartY = e.clientY - container.offsetTop;
+        e.preventDefault();
+    });
+    window.addEventListener('mousemove', e => {
+        if (!isDraggingPanel) return;
+        container.style.transform = 'none';
+        container.style.left = (e.clientX - dragStartX) + 'px';
+        container.style.top = (e.clientY - dragStartY) + 'px';
+        container.style.bottom = 'auto';
+    });
+    window.addEventListener('mouseup', () => { isDraggingPanel = false; });
+
+    // ---------------------------------------------------------------- values
+    const values = { ias: 250, hdg: 270, vs: 0, alt: 5000, crs: 0 };
+    const STEP = { ias: 1, hdg: 1, crs: 1, vs: 100, alt: 100 };
+    const rot = { ias: 0, hdg: 0, crs: 0, alt: 0, vs: 0 };
+    const lastInteractionTime = { ias: 0, hdg: 0, vs: 0, alt: 0, crs: 0 };
+    const modeOf = { ias: 'speed', hdg: 'heading', vs: 'verticalSpeed', alt: 'altitude' };
+    let bankIdx = 2, atOn = false, fdOn = true, apChannel = 'A';
+    const localLit = {};
+
+    const dispIds = { ias: ['disp-ias'], hdg: ['disp-hdg', 'disp-hdg2'], alt: ['disp-alt'], vs: ['disp-vs'], crs: ['disp-crsL', 'disp-crsR'] };
+    const dialIds = { ias: ['dial-ias'], hdg: ['dial-hdg', 'dial-hdg2'], alt: ['dial-alt'], crs: ['dial-crsL', 'dial-crsR'] };
+    const isDrum = () => !!curTheme && curTheme.dtype === 'drum';
+
+    function fmt(p) {
+        const v = values[p];
+        switch (p) {
+            case 'ias': return String(Math.round(v)).padStart(layout.iasW, ' ').slice(-layout.iasW);
+            case 'hdg':
+            case 'crs': return String(v).padStart(3, '0');
+            case 'alt': return String(v).padStart(5, isDrum() ? '0' : ' ').slice(-5);
+            case 'vs':
+                if (layout.vsStyle === 'blank') return v === 0 ? '     ' : (v < 0 ? '-' : ' ') + String(Math.abs(v)).padStart(4, ' ');
+                return (v < 0 ? '-' : '+') + String(Math.abs(v)).padStart(4, '0');
+        }
+        return '';
+    }
+
+    function renderDisp(p) {
+        const t = fmt(p), drum = isDrum(), key = (drum ? 'D' : 'L') + t;
+        (dispIds[p] || []).forEach(id => {
+            const e = $(id);
+            if (!e || e.dataset.t === key) return;
+            e.dataset.t = key;
+            if (layout.drum) e.classList.toggle('drum', drum);
+            e.innerHTML = (drum && layout.drum)
+                ? `<div class="dr">${[...t].map(c => `<span>${c === ' ' ? '' : c}</span>`).join('')}</div>`
+                : [...t].map(digit).join('');
+        });
+    }
+
+    function updateDisplay(p, diff = 0) {
+        renderDisp(p);
+        rot[p] += diff / STEP[p] * 12;
+        if (p === 'vs') {
+            const w = $('vs-wheel');
+            if (w) w.style.backgroundPositionY = (-rot.vs / 3) + 'px';
+            const g = $('dial-vs');
+            if (g) g.style.transform = `rotate(${rot.vs}deg)`;
+        } else {
+            (dialIds[p] || []).forEach(id => {
+                const g = $(id);
+                if (g) g.style.transform = `rotate(${rot[p]}deg)`;
+            });
         }
     }
 
-    const values = { ias: 250, hdg: 270, vs: 0, alt: 5000 };
-    const cumulativeRot = { ias: 250 * 1.5, hdg: 270, vs: 0, alt: 5000 * 1.5 };
-    const lastInteractionTime = { ias: 0, hdg: 0, vs: 0, alt: 0 };
+    function setBank(i) {
+        bankIdx = Math.min(4, Math.max(0, i));
+        const g = $('dial-bank');
+        if (g) g.style.transform = `rotate(${layout.bankMin + bankIdx * layout.bankStep}deg)`;
+    }
 
+    function changeValue(param, amount) {
+        const oldVal = values[param];
+        let val = oldVal + amount;
+        if (param === 'ias') val = Math.max(val, 0);
+        else if (param === 'hdg' || param === 'crs') val = (val % 360 + 360) % 360;
+        else if (param === 'vs') val = Math.min(Math.max(val, -6000), 6000);
+        else if (param === 'alt') val = Math.min(Math.max(val, 0), 60000);
+
+        let diff = val - oldVal;
+        if (param === 'hdg' || param === 'crs') {
+            if (diff > 180) diff -= 360;
+            if (diff < -180) diff += 360;
+        }
+        values[param] = val;
+        lastInteractionTime[param] = Date.now();
+        updateDisplay(param, diff);
+        if (param !== 'crs') pushValuesToGeoFS();
+    }
+
+    // ---- interaction (global handlers, per-element bindings are rebuilt with each layout)
+    let dragState = null, holdTimer = null;
+    window.addEventListener('mousemove', e => {
+        if (!dragState) return;
+        dragState.acc += dragState.startY - e.clientY;
+        dragState.startY = e.clientY;
+        if (Math.abs(dragState.acc) >= 8) {
+            const raw = Math.trunc(dragState.acc / 8);
+            const mult = Math.min(Math.max(Math.abs(raw), 1), 5);
+            changeValue(dragState.param, raw > 0 ? dragState.base * mult : -dragState.base * mult);
+            dragState.acc %= 8;
+        }
+    });
+    window.addEventListener('mouseup', () => {
+        dragState = null;
+        if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+        const d = $('btn-disengage');
+        if (d) d.classList.remove('press');
+    });
+
+    function makeInteractive(id, param, mode) {
+        const el = $(id);
+        if (!el) return;
+        const base = STEP[param];
+
+        el.addEventListener('mousedown', e => {
+            if (e.button === 1) { // middle click = toggle the related autopilot mode
+                if (modeOf[param]) toggleGeoFSMode(modeOf[param]);
+                e.preventDefault(); e.stopPropagation();
+                return;
+            }
+            if (e.button !== 0) return;
+            if (mode === 'hold') {
+                const r = el.getBoundingClientRect();
+                const dir = (e.clientX - r.left) > r.width / 2 ? 1 : -1;
+                if (!holdTimer) {
+                    changeValue(param, dir * base);
+                    holdTimer = setInterval(() => changeValue(param, dir * base), 120);
+                }
+            } else {
+                dragState = { param, base, startY: e.clientY, acc: 0 };
+            }
+            e.stopPropagation();
+            e.preventDefault();
+        });
+
+        el.addEventListener('wheel', e => {
+            if (e.altKey) return;
+            if (param === 'hdg' && e.shiftKey) setBank(bankIdx + (e.deltaY < 0 ? 1 : -1));
+            else changeValue(param, e.deltaY < 0 ? base : -base);
+            e.preventDefault();
+            e.stopPropagation();
+        }, { passive: false });
+    }
+
+    // ---------------------------------------------------------- GeoFS bridge
     const domSelectors = {
         ias: ['#autopilotSpeed', 'input[data-autopilot="speed"]', '.autopilot-speed-input', '.geofs-ap-speed', '#geofs-ap-input-speed'],
         hdg: [
@@ -323,12 +748,8 @@
         try {
             if (typeof geofs !== 'undefined') {
                 if (geofs.animation && geofs.animation.values) {
-                    if (typeof geofs.animation.values.heading360 === 'number') {
-                        return geofs.animation.values.heading360;
-                    }
-                    if (typeof geofs.animation.values.heading === 'number') {
-                        return (geofs.animation.values.heading % 360 + 360) % 360;
-                    }
+                    if (typeof geofs.animation.values.heading360 === 'number') return geofs.animation.values.heading360;
+                    if (typeof geofs.animation.values.heading === 'number') return (geofs.animation.values.heading % 360 + 360) % 360;
                 }
                 if (geofs.aircraft && geofs.aircraft.instance && typeof geofs.aircraft.instance.htg === 'number') {
                     return (geofs.aircraft.instance.htg % 360 + 360) % 360;
@@ -349,135 +770,10 @@
         return false;
     }
 
-    function updateDisplay(param, deltaAmount = 0) {
-        let val = values[param];
-        const step = (param === 'alt' || param === 'vs') ? 100 : 1;
-        const strip = document.getElementById(`drum-${param}`);
-        const dial = document.getElementById(`dial-${param}`);
-
-        if (strip) {
-            strip.innerHTML = `
-                <div class="drum-digit">${val - step}</div>
-                <div class="drum-digit">${val}</div>
-                <div class="drum-digit">${val + step}</div>
-            `;
-            strip.style.transform = `translateY(-32px)`;
-        }
-
-        if (dial) {
-            if (param === 'hdg') {
-                if (deltaAmount > 180) deltaAmount -= 360;
-                if (deltaAmount < -180) deltaAmount += 360;
-                cumulativeRot.hdg += deltaAmount;
-                dial.style.transform = `rotate(${cumulativeRot.hdg}deg)`;
-            } else {
-                cumulativeRot[param] += deltaAmount * 1.5;
-                dial.style.transform = `rotate(${cumulativeRot[param]}deg)`;
-            }
-        }
-    }
-
-    function changeValue(param, amount) {
-        let oldVal = values[param];
-        let val = oldVal + amount;
-
-        if (param === 'ias') {
-            val = Math.max(val, 0);
-        } else if (param === 'hdg') {
-            val = (val % 360 + 360) % 360;
-        } else if (param === 'vs') {
-            val = Math.min(Math.max(val, -6000), 6000);
-        } else if (param === 'alt') {
-            val = Math.min(Math.max(val, 0), 60000);
-        }
-
-        let diff = val - oldVal;
-        if (param === 'hdg') {
-            if (diff > 180) diff -= 360;
-            if (diff < -180) diff += 360;
-        }
-
-        values[param] = val;
-        lastInteractionTime[param] = Date.now();
-        updateDisplay(param, diff);
-        pushValuesToGeoFS();
-    }
-
-    function makeInteractive(targetElementId, param) {
-        const el = document.getElementById(targetElementId);
-        if (!el) return;
-        const baseStep = (param === 'alt' || param === 'vs') ? 100 : 1;
-
-        let holdInterval = null;
-        let isDragging = false;
-        let startY = 0;
-        let accumulatedDelta = 0;
-
-        function startHolding(direction) {
-            if (holdInterval) return;
-            changeValue(param, direction * baseStep);
-            holdInterval = setInterval(() => {
-                changeValue(param, direction * baseStep);
-            }, 120);
-        }
-
-        function stopHolding() {
-            if (holdInterval) {
-                clearInterval(holdInterval);
-                holdInterval = null;
-            }
-            isDragging = false;
-        }
-
-        el.addEventListener('mousedown', (e) => {
-            const rect = el.getBoundingClientRect();
-            const clickX = e.clientX - rect.left;
-            const midX = rect.width / 2;
-
-            if (targetElementId.startsWith('wrap-')) {
-                const direction = clickX > midX ? 1 : -1;
-                startHolding(direction);
-            } else {
-                isDragging = true;
-                startY = e.clientY;
-                accumulatedDelta = 0;
-            }
-            e.stopPropagation();
-            e.preventDefault();
-        });
-
-        window.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            const deltaY = startY - e.clientY;
-            accumulatedDelta += deltaY;
-
-            if (Math.abs(accumulatedDelta) >= 8) {
-                const rawSteps = Math.trunc(accumulatedDelta / 8);
-                const multiplier = Math.min(Math.max(Math.abs(rawSteps), 1), 5);
-                changeValue(param, rawSteps > 0 ? (baseStep * multiplier) : -(baseStep * multiplier));
-
-                accumulatedDelta %= 8;
-                startY = e.clientY;
-            }
-        });
-
-        window.addEventListener('mouseup', stopHolding);
-
-        el.addEventListener('wheel', (e) => {
-            changeValue(param, e.deltaY < 0 ? baseStep : -baseStep);
-            e.preventDefault();
-        }, { passive: false });
-    }
-
-    ['ias', 'hdg', 'vs', 'alt'].forEach(param => {
-        makeInteractive(`wrap-${param}`, param);
-        makeInteractive(`box-${param}`, param);
-    });
-
     function pushValuesToGeoFS() {
         try {
             Object.keys(domSelectors).forEach(key => {
-                let val = values[key];
+                const val = values[key];
                 domSelectors[key].forEach(sel => {
                     document.querySelectorAll(sel).forEach(el => {
                         if ((el.tagName === 'INPUT' || typeof el.value !== 'undefined') && el.value != val) {
@@ -492,6 +788,7 @@
             });
 
             document.querySelectorAll('input').forEach(input => {
+                if (container.contains(input)) return;
                 const parentText = (input.parentElement ? input.parentElement.innerText : '') + (input.className || '') + (input.id || '');
                 if (parentText.toLowerCase().includes('hdg') || parentText.toLowerCase().includes('heading')) {
                     if (input.value != values.hdg) {
@@ -518,15 +815,9 @@
                     geofs.autopilot.values.climbRate = values.vs;
                 }
 
-                if (typeof geofs.autopilot.setTargetHeading === 'function') {
-                    geofs.autopilot.setTargetHeading(values.hdg);
-                }
-                if (typeof geofs.autopilot.setHeading === 'function') {
-                    geofs.autopilot.setHeading(values.hdg);
-                }
-                if (typeof geofs.autopilot.turnTo === 'function') {
-                    geofs.autopilot.turnTo(values.hdg);
-                }
+                if (typeof geofs.autopilot.setTargetHeading === 'function') geofs.autopilot.setTargetHeading(values.hdg);
+                if (typeof geofs.autopilot.setHeading === 'function') geofs.autopilot.setHeading(values.hdg);
+                if (typeof geofs.autopilot.turnTo === 'function') geofs.autopilot.turnTo(values.hdg);
             }
         } catch (err) {
             console.warn('[GeoFS MCP] Sync notice:', err);
@@ -564,43 +855,173 @@
         }
     }
 
+    // ------------------------------------------------- buttons & indicators
+    const setOn = (id, on) => { const e = $(id); if (e) e.classList.toggle('on', !!on); };
+
+    function setAT(on) {
+        atOn = !!on;
+        const lever = $('at-lever');
+        if (lever) lever.style.transform = atOn ? 'rotate(0deg)' : 'rotate(180deg)';
+        setOn('at-led', atOn);
+        setOn('atsw', atOn);
+    }
+
+    function setFD(on) {
+        fdOn = !!on;
+        ['fd-L', 'fd-R'].forEach(id => { const e = $(id); if (e) e.classList.toggle('off', !fdOn); });
+        setOn('ma-L', fdOn);
+        setOn('ma-R', fdOn);
+    }
+
     function syncModeButtons() {
-        if (typeof geofs !== 'undefined' && geofs.autopilot) {
-            const modes = geofs.autopilot.modes || {};
-            const map = {
-                speed: ['#set-ias', '#btn-spd'],
-                heading: ['#set-hdg', '#btn-hdghold'],
-                verticalSpeed: ['#set-vs', '#btn-vshold'],
-                altitude: ['#set-alt', '#btn-althold']
-            };
+        if (typeof geofs === 'undefined' || !geofs.autopilot) return;
+        const ap = geofs.autopilot;
+        const modes = ap.modes || {};
+        const speedOn = !!modes.speed;
+        setOn('btn-speed', speedOn);
+        setOn('btn-athr', speedOn);
+        setOn('btn-hdgsel', modes.heading || modes.targetHeading);
+        setOn('btn-hdghold', modes.heading || modes.targetHeading);
+        setOn('btn-althld', modes.altitude);
+        setOn('btn-vs', modes.verticalSpeed);
+        setOn('btn-cmda', ap.on && apChannel === 'A');
+        setOn('btn-cmdb', ap.on && apChannel === 'B');
+        setOn('btn-cmdc', ap.on && apChannel === 'C');
+        setAT(speedOn);
+    }
 
-            Object.keys(map).forEach(mode => {
-                const isActive = !!(modes[mode] || (mode === 'heading' && modes['targetHeading']));
-                map[mode].forEach(sel => {
-                    const el = document.querySelector(sel);
-                    if (el) {
-                        if (isActive) el.classList.add('active');
-                        else el.classList.remove('active');
-                    }
-                });
-            });
-
-            const cmdBtn = document.getElementById('btn-cmd');
-            if (cmdBtn) {
-                if (geofs.autopilot.on) {
-                    cmdBtn.classList.add('active');
-                    cmdBtn.innerText = 'DISENGAGE';
-                } else {
-                    cmdBtn.classList.remove('active');
-                    cmdBtn.innerText = 'ENGAGE ALL';
-                }
+    function toggleAP(channel) {
+        try {
+            if (typeof geofs === 'undefined' || !geofs.autopilot) return;
+            apChannel = channel;
+            if (!geofs.autopilot.on) {
+                if (typeof geofs.autopilot.turnOn === 'function') geofs.autopilot.turnOn();
+                else geofs.autopilot.on = true;
+            } else {
+                if (typeof geofs.autopilot.turnOff === 'function') geofs.autopilot.turnOff();
+                else geofs.autopilot.on = false;
             }
+            pushValuesToGeoFS();
+            syncModeButtons();
+        } catch (err) {
+            console.warn('[GeoFS MCP] Engage notice:', err);
         }
     }
 
+    const LOCAL_LAMPS = ['btn-n1', 'btn-lvlchg', 'btn-vnav', 'btn-lnav', 'btn-vorloc', 'btn-app', 'btn-cwsa', 'btn-cwsb',
+                         'btn-thr', 'btn-flch', 'btn-loc', 'btn-exped',
+                         'btn-machhold', 'btn-iasacq', 'btn-ins', 'btn-trkhdg', 'btn-backbeam', 'btn-turb', 'btn-pitchhold',
+                         'btn-goaround', 'btn-land', 'btn-mach2', 'btn-maxclimb', 'btn-ias2', 'btn-glide', 'btn-maxcruise',
+                         'btn-altacq', 'btn-at2', 'btn-nav'];
+    const REAL_MODES = { 'btn-speed': 'speed', 'btn-athr': 'speed', 'btn-hdgsel': 'heading', 'btn-hdghold': 'heading',
+                         'btn-althld': 'altitude', 'btn-vs': 'verticalSpeed' };
+
+    function bindControls() {
+        [['ias', 'ias'], ['hdg', 'hdg'], ['alt', 'alt'], ['vs', 'vs']].forEach(([k, p]) => {
+            makeInteractive('wrap-' + k, p, k === 'vs' && $('vs-wheel') ? 'drag' : 'hold');
+            makeInteractive('disp-' + k, p, 'drag');
+        });
+        makeInteractive('wrap-hdg2', 'hdg', 'hold');
+        makeInteractive('disp-hdg2', 'hdg', 'drag');
+        makeInteractive('wrap-crsL', 'crs', 'hold');
+        makeInteractive('wrap-crsR', 'crs', 'hold');
+        makeInteractive('disp-crsL', 'crs', 'drag');
+        makeInteractive('disp-crsR', 'crs', 'drag');
+
+        const hk = $('wrap-hdg');
+        if (hk) hk.addEventListener('contextmenu', e => { setBank(bankIdx >= 4 ? 0 : bankIdx + 1); e.preventDefault(); });
+
+        Object.keys(REAL_MODES).forEach(id => {
+            const e = $(id);
+            if (e) e.addEventListener('click', () => toggleGeoFSMode(REAL_MODES[id]));
+        });
+        const at = $('atsw');
+        if (at) at.addEventListener('click', () => toggleGeoFSMode('speed'));
+
+        LOCAL_LAMPS.forEach(id => {
+            const e = $(id);
+            if (!e) return;
+            e.classList.toggle('on', !!localLit[id]);
+            e.addEventListener('click', () => { localLit[id] = !localLit[id]; e.classList.toggle('on', localLit[id]); });
+        });
+
+        [['btn-cmda', 'A'], ['btn-cmdb', 'B'], ['btn-cmdc', 'C']].forEach(([id, ch]) => {
+            const e = $(id);
+            if (e) e.addEventListener('click', () => toggleAP(ch));
+        });
+
+        const dis = $('btn-disengage');
+        if (dis) {
+            dis.addEventListener('mousedown', () => dis.classList.add('press'));
+            dis.addEventListener('click', () => {
+                try {
+                    if (typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.on) {
+                        if (typeof geofs.autopilot.turnOff === 'function') geofs.autopilot.turnOff();
+                        else geofs.autopilot.on = false;
+                    }
+                } catch (err) {}
+                LOCAL_LAMPS.forEach(id => { localLit[id] = false; setOn(id, false); });
+                dis.classList.add('alert');
+                setTimeout(() => dis.classList.remove('alert'), 1200);
+                syncModeButtons();
+            });
+        }
+
+        ['fd-L', 'fd-R'].forEach(id => {
+            const e = $(id);
+            if (e) e.addEventListener('click', () => setFD(!fdOn));
+        });
+    }
+
+    // ----------------------------------------------------- layout switching
+    function buildLayout(name) {
+        layout = LAYOUTS[name] || LAYOUTS.b737;
+        W = layout.W; H = layout.H;
+        stage.style.width = W + 'px';
+        stage.style.height = H + 'px';
+        stage.innerHTML = layout.build();
+        updateSize();
+        bindControls();
+        ['ias', 'hdg', 'vs', 'alt', 'crs'].forEach(p => updateDisplay(p, 0));
+        setBank(bankIdx);
+        setAT(atOn);
+        setFD(fdOn);
+        syncModeButtons();
+    }
+
+    function applyTheme(t) {
+        const need = !curTheme || curTheme.layout !== t.layout || curTheme.dtype !== t.dtype;
+        curTheme = t;
+        const vars = { '--bg': t.bg, '--border': t.border, '--txt': t.txt, '--disp': t.disp, '--face': t.face, '--k1': t.k1, '--k2': t.k2 };
+        Object.keys(vars).forEach(k => {
+            container.style.setProperty(k, vars[k]);
+            tab.style.setProperty(k, vars[k]);
+        });
+        if (need) buildLayout(t.layout);
+    }
+
+    let currentAircraftId = null;
+    function updateAircraftTheme() {
+        try {
+            if (typeof geofs === 'undefined' || !geofs.aircraft || !geofs.aircraft.instance) return;
+            const inst = geofs.aircraft.instance;
+            const acId = inst.id;
+            const acName = ((inst.aircraftRecord && inst.aircraftRecord.name) || inst.name || '').toLowerCase();
+            if (acId === currentAircraftId) return;
+            currentAircraftId = acId;
+            let theme = THEMES.DEFAULT;
+            for (const [regex, key] of THEME_RULES) {
+                if (regex.test(acName)) { theme = THEMES[key]; break; }
+            }
+            applyTheme(theme);
+        } catch (e) {
+            console.warn('[GeoFS MCP] Theme update error:', e);
+        }
+    }
+
+    // ------------------------------------------------------- pull from GeoFS
     function pullFromNativeUI() {
         const now = Date.now();
-
         updateAircraftTheme();
 
         try {
@@ -608,12 +1029,10 @@
                 const ap = geofs.autopilot;
                 const sourceVals = ap.values || ap;
                 const isHdgActive = !!(ap.modes && (ap.modes.heading || ap.modes.targetHeading));
-
                 const planeHdg = getPlaneHeading();
                 const stationary = isAircraftStationary();
 
                 const nativeIas = sourceVals.speed;
-
                 let nativeHdg;
                 if (stationary || !isHdgActive) {
                     nativeHdg = (planeHdg !== null && planeHdg !== undefined)
@@ -622,20 +1041,16 @@
                 } else {
                     nativeHdg = (sourceVals.targetHeading !== undefined ? sourceVals.targetHeading : (sourceVals.heading !== undefined ? sourceVals.heading : ap.targetHeading));
                 }
-
                 const nativeAlt = sourceVals.altitude;
                 const nativeVs = sourceVals.verticalSpeed !== undefined ? sourceVals.verticalSpeed : sourceVals.climbRate;
 
                 const map = { ias: nativeIas, hdg: nativeHdg, alt: nativeAlt, vs: nativeVs };
-
                 Object.keys(map).forEach(key => {
                     if (now - (lastInteractionTime[key] || 0) < 1000) return;
-
-                    let nativeVal = map[key];
+                    const nativeVal = map[key];
                     if (nativeVal !== undefined && nativeVal !== null && !isNaN(parseFloat(nativeVal))) {
                         let rounded = Math.round(parseFloat(nativeVal));
                         if (key === 'hdg') rounded = (rounded % 360 + 360) % 360;
-
                         if (rounded !== values[key]) {
                             let diff = rounded - values[key];
                             if (key === 'hdg') {
@@ -647,7 +1062,6 @@
                         }
                     }
                 });
-
                 syncModeButtons();
             }
         } catch (err) {
@@ -655,54 +1069,11 @@
         }
     }
 
+    // ------------------------------------------------------------------ init
+    applyTheme(THEMES.DEFAULT);
     setInterval(pullFromNativeUI, 200);
-
-    const modeMapping = { ias: 'speed', hdg: 'heading', vs: 'verticalSpeed', alt: 'altitude' };
-
-    ['ias', 'hdg', 'vs', 'alt'].forEach(param => {
-        const setBtn = document.getElementById(`set-${param}`);
-        if (setBtn) {
-            setBtn.addEventListener('click', function() {
-                const modeName = modeMapping[param];
-                toggleGeoFSMode(modeName);
-            });
-        }
-    });
-
-    const bindBtnMode = (id, mode) => {
-        const btn = document.getElementById(id);
-        if (btn) {
-            btn.addEventListener('click', () => {
-                toggleGeoFSMode(mode);
-            });
-        }
-    };
-
-    bindBtnMode('btn-spd', 'speed');
-    bindBtnMode('btn-hdghold', 'heading');
-    bindBtnMode('btn-vshold', 'verticalSpeed');
-    bindBtnMode('btn-althold', 'altitude');
-
-    document.getElementById('btn-cmd').addEventListener('click', () => {
-        try {
-            if (typeof geofs !== 'undefined' && geofs.autopilot) {
-                if (!geofs.autopilot.on) {
-                    if (typeof geofs.autopilot.turnOn === 'function') geofs.autopilot.turnOn();
-                    else geofs.autopilot.on = true;
-                } else {
-                    if (typeof geofs.autopilot.turnOff === 'function') geofs.autopilot.turnOff();
-                    else geofs.autopilot.on = false;
-                }
-                pushValuesToGeoFS();
-                syncModeButtons();
-            }
-        } catch (err) {
-            console.warn('[GeoFS MCP] Engage notice:', err);
-        }
-    });
-
     setTimeout(() => {
         pullFromNativeUI();
-        ['ias', 'hdg', 'vs', 'alt'].forEach(param => updateDisplay(param, 0));
+        ['ias', 'hdg', 'vs', 'alt', 'crs'].forEach(p => updateDisplay(p, 0));
     }, 1500);
 })();
