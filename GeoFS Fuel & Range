@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS Fuel & Range
 // @namespace    geofs-plugins
-// @version      1
-// @description  Auto-detects your aircraft, plans fuel for a flight (climb/cruise/descent, trip, reserve, alternate), fills the tank, tracks range, shows real-world endurance/range/lifespan, and shuts the engines down when you run dry. Includes an occasional Elegance Airways promo popup.
+// @version      3.12
+// @description  Auto-detects your aircraft, plans fuel for a flight (climb/cruise/descent, trip, reserve, alternate), fills the tank, tracks range, shows real-world endurance/range/lifespan, and shuts the engines down when you run dry.
 // @match        https://www.geo-fs.com/geofs.php*
 // @match        https://geo-fs.com/geofs.php*
 // @grant        none
@@ -10,44 +10,6 @@
 
 (function () {
   'use strict';
-
-  // ===== Elegance Airways promo popup (runs first, isolated from the rest of the script) =====
-  try {
-    const PAGE_URL = 'https://geofs.fandom.com/wiki/Elegance_Airways?file=Elegance_AIrways_Logo_.png';
-    const IMG_URL  = 'https://geofs.fandom.com/wiki/Special:FilePath/Elegance_AIrways_Logo_.png';
-    const FIRST_DELAY_MS = 5 * 1000;       // first popup 5 s after load (set 60 * 1000 once it works)
-    const INTERVAL_MS    = 5 * 60 * 1000;  // then every 5 min
-    const SHOW_FOR_MS    = 15 * 1000;      // auto-hide after 15 s (0 = stay until closed)
-
-    const eaBox = document.createElement('div');
-    eaBox.style.cssText = 'position:fixed;top:80px;left:70px;z-index:2147483647;display:none;width:240px;' +
-      'background:rgba(15,18,24,.95);border:1px solid #334155;border-radius:10px;padding:8px;' +
-      'box-shadow:0 6px 24px rgba(0,0,0,.5);font:12px system-ui,sans-serif;color:#e5e7eb;text-align:center';
-    eaBox.innerHTML =
-      '<div id="ea-x" title="Close" style="position:absolute;top:2px;right:8px;cursor:pointer;font-size:18px;opacity:.7">×</div>' +
-      '<a id="ea-link" href="' + PAGE_URL + '" target="_blank" rel="noopener" style="display:block;color:#fff;text-decoration:none">' +
-      '<img id="ea-img" src="' + IMG_URL + '" alt="Elegance Airways" style="max-width:100%;max-height:160px;display:block;margin:12px auto 6px;cursor:pointer">' +
-      '<div id="ea-txt" style="display:none;padding:18px 10px;font-weight:700">✈ Elegance Airways</div></a>';
-    (document.body || document.documentElement).appendChild(eaBox);
-
-    const eaImg = eaBox.querySelector('#ea-img'), eaTxt = eaBox.querySelector('#ea-txt');
-    eaImg.onerror = () => { eaImg.style.display = 'none'; eaTxt.style.display = 'block'; };
-
-    let eaTimer = null;
-    const eaHide = () => { eaBox.style.display = 'none'; clearTimeout(eaTimer); };
-    const eaShow = () => {
-      eaBox.style.display = 'block';
-      clearTimeout(eaTimer);
-      if (SHOW_FOR_MS > 0) eaTimer = setTimeout(eaHide, SHOW_FOR_MS);
-    };
-    eaBox.querySelector('#ea-x').onclick = eaHide;
-    eaBox.querySelector('#ea-link').addEventListener('click', eaHide);
-
-    window.eleganceShow = eaShow;          // test from the console: eleganceShow()
-    setTimeout(() => { eaShow(); setInterval(eaShow, INTERVAL_MS); }, FIRST_DELAY_MS);
-    console.log('[Elegance popup] loaded');
-  } catch (e) { console.error('[Elegance popup] failed:', e); }
-  // ===== end promo popup =====
 
   // ===== shared mini-library (identical in every GeoFS Companion plugin) =====
   const M_TO_FT = 3.28084, M_TO_NM = 1 / 1852;
@@ -85,7 +47,6 @@
   function acName() {
     try { return geofs.aircraft.instance.aircraftRecord.name || 'Aircraft'; } catch (e) { return 'Aircraft'; }
   }
-
 
   // Target (lat, lon) shared between plugins through localStorage
   const Target = (function () {
@@ -136,7 +97,6 @@
       .gfl-panel .tot{font-weight:700;border-top:1px solid #334155;margin-top:3px;padding-top:3px}
       .gfl-panel .lbl{display:block;margin-top:5px}
       .gfl-panel .ref{padding:2px 0}
-
 
       .gfl-panel .ref span{display:block;opacity:.6;font-size:11px}
       .gfl-panel .ref b{display:block;font-weight:600;color:#fff;font-variant-numeric:tabular-nums}`;
@@ -189,7 +149,6 @@
       const hagl = typeof av.haglFeet === 'number' ? av.haglFeet : null;
       const onGround = !!inst.groundContact || (hagl !== null && hagl < 2);
 
-
       if (!onGround && (hagl === null ? T.airSec > 15 : hagl > 50)) T.wasHigh = true;
       let dt = 0, dNm = 0, gsInst = 0;
       if (T.last) {
@@ -239,7 +198,6 @@
     OMDB:[25.2528,55.3644],OMAA:[24.433,54.6511],OTHH:[25.2731,51.6081],OERK:[24.9576,46.6988],LLBG:[32.0114,34.8867],
     HECA:[30.1219,31.4056],FAOR:[-26.1392,28.246],FACT:[-33.9649,18.6017],HKJK:[-1.3192,36.9278],
     VIDP:[28.5562,77.1],VABB:[19.0887,72.8679],VHHH:[22.308,113.9185],VTBS:[13.69,100.7501],WSSS:[1.3644,103.9915],
-
     WMKK:[2.7456,101.7099],RJTT:[35.5494,139.7798],RJAA:[35.7647,140.3864],RKSI:[37.4602,126.4407],ZBAA:[40.0801,116.5846],
 
     ZSPD:[31.1443,121.8083],YSSY:[-33.9399,151.1753],YMML:[-37.669,144.841],NZAA:[-37.0082,174.785],
@@ -290,7 +248,6 @@
     [/747/, 'Boeing 747', 383000, 24000, 490, 30],
     [/777/, 'Boeing 777', 320000, 16200, 490, 30],
     [/787|dreamliner/, 'Boeing 787', 223700, 11900, 488, 30],
-
     [/767/, 'Boeing 767', 161000, 12500, 460, 30],
     [/757/, 'Boeing 757', 75500, 6800, 450, 30],
     [/737|b73\d/, 'Boeing 737', 46000, 5500, 450, 30],
@@ -341,7 +298,6 @@
     [/777.?9|777x/, 'Boeing 777-9', '14 - 16 hours', '7285 nm (13500 km)', '~40000 cycles'],
 
     [/777/, 'Boeing 777-300ER', '14 - 17 hours', '7370 nm (13650 km)', '~40000 cycles / 60000 h'],
-
     [/747/, 'Boeing 747-8', '12 - 16 hours', '8000 nm (-8i) / 4100 nm (-8F max payload)', '~35000 cycles'],
     [/757|767/, 'Boeing 757 / 767', '6 - 11 hours', '3900 nm (757-200) / 5980 - 6590 nm (767)', '50000 cycles / 50000 - 75000 h'],
     [/737|b73\d/, 'Boeing 737 (NG/MAX)', '5 - 8 hours', '2935 - 3850 nm (5400 - 7100 km)', '75000 cycles (NG)'],
@@ -392,7 +348,6 @@
         <input type="range" id="fu-fill" min="0" max="100" step="1" value="100">
         <button id="fu-full">Fill up</button><button class="g" id="fu-auto">Auto-detect aircraft</button>
       </div>
-
       <div class="sec">
 
         <div class="muted">Aircraft settings (editing switches to manual)</div>
@@ -414,6 +369,8 @@
       <button class="g" id="fp-import" style="margin-top:4px">Import GeoFS flight plan</button>
       <div class="sec">
         <div class="row"><span>Headwind (kt, − = tailwind)</span><input class="sm" type="number" id="fp-wind"></div>
+        <label class="ck"><input type="checkbox" id="fp-awind"><span>Auto wind: typical jet-stream estimate when Headwind is 0 (flights over 300 nm)</span></label>
+        <label class="ck"><input type="checkbox" id="fp-aalt"><span>Auto alternate: nearby alternate when blank (major hubs)</span></label>
         <div class="row"><span>Taxi time (min)</span><input class="sm" type="number" id="fp-taxi" min="0"></div>
         <div class="row"><span>Route extra (%)</span><input class="sm" type="number" id="fp-extra" min="0"></div>
         <div class="row"><span>Extra fuel (lb)</span><input class="sm" type="number" id="fp-add" min="0"></div>
@@ -425,7 +382,7 @@
 
   // ---- state ----
   const F = Object.assign({ cap: 45000, cruise: 5500, speed: 450, reserve: 30, left: 45000, auto: true, cutoff: true, profile: '', acKey: null }, LS.get('gfl_fuel2', {}));
-  const PL = Object.assign({ from: '', to: '', alt: '', wind: 0, taxi: 10, extra: 5, add: 0 }, LS.get('gfl_plan', {}));
+  const PL = Object.assign({ from: '', to: '', alt: '', wind: 0, taxi: 10, extra: 5, add: 0, autoWind: true, autoAlt: true }, LS.get('gfl_plan', {}));
   let onGroundNow = true, burnRate = 0, lastSave = 0, lastLla = null, lastT = null, route = null, lastPlan = null, sliding = false, tab = 'status', refShown = null;
   const save = () => LS.set('gfl_fuel2', F);
   const n0 = x => Math.round(x).toLocaleString();
@@ -443,7 +400,6 @@
       if (inst.engine && typeof inst.engine.on === 'boolean') return inst.engine.on;
       if (Array.isArray(inst.engines) && inst.engines.some(e => typeof e.on === 'boolean')) return inst.engines.some(e => e.on === true);
     } catch (e) { /* ignore */ }
-
     return null;
   }
 
@@ -494,7 +450,6 @@
   ['fu-cap', 'fu-cb', 'fu-sp', 'fu-res'].forEach(id => $(id).addEventListener('change', () => {
     const cap = parseFloat($('fu-cap').value), cb = parseFloat($('fu-cb').value), sp = parseFloat($('fu-sp').value), rs = parseFloat($('fu-res').value);
     if (cap > 0) F.cap = cap; if (cb > 0) F.cruise = cb; if (sp > 0) F.speed = sp; if (rs >= 0) F.reserve = rs;
-
     F.auto = false; F.profile = 'Manual settings'; F.left = Math.min(F.left, F.cap); save();
   }));
   $('fu-cut').checked = !!F.cutoff;
@@ -522,7 +477,7 @@
 
     // Plan with cruise burn on the ground; in the air use the real burn, kept within a sensible band
     const airborne = T && !onGroundNow;
-    const pb = airborne && burnRate > 0 ? clamp(burnRate, F.cruise, F.cruise * 1.3) : F.cruise;
+    const pb = airborne && burnRate > 0 ? clamp(burnRate, F.cruise * 0.8, F.cruise * 1.3) : F.cruise;
     const reserveLb = pb * (F.reserve / 60);
     const usable = Math.max(0, F.left - reserveLb);
     const endH = pb > 0 ? usable / pb : Infinity;
@@ -545,7 +500,6 @@
       arr.style.color = leftAtTarget >= reserveLb ? '#4ade80' : '#f87171';
     } else { arr.textContent = '—'; arr.style.color = ''; }
     const w = $('fu-warn');
-
     if (F.left <= 0) { w.textContent = F.cutoff ? '⛔ OUT OF FUEL — engines shut down' : '⚠ FUEL EXHAUSTED'; w.style.color = '#ef4444'; }
     else if (F.left <= reserveLb) { w.textContent = '⚠ BELOW RESERVE'; w.style.color = '#fb923c'; }
     else w.textContent = '';
@@ -555,18 +509,44 @@
   function loadPlan() {
     $('fp-from').value = PL.from; $('fp-to').value = PL.to; $('fp-alt').value = PL.alt;
     $('fp-wind').value = PL.wind; $('fp-taxi').value = PL.taxi; $('fp-extra').value = PL.extra; $('fp-add').value = PL.add;
+    $('fp-awind').checked = !!PL.autoWind; $('fp-aalt').checked = !!PL.autoAlt;
   }
   function readPlan() {
     PL.from = $('fp-from').value.trim(); PL.to = $('fp-to').value.trim(); PL.alt = $('fp-alt').value.trim();
     PL.wind = parseFloat($('fp-wind').value) || 0; PL.taxi = Math.max(0, parseFloat($('fp-taxi').value) || 0);
 
     PL.extra = Math.max(0, parseFloat($('fp-extra').value) || 0); PL.add = Math.max(0, parseFloat($('fp-add').value) || 0);
+    PL.autoWind = $('fp-awind').checked; PL.autoAlt = $('fp-aalt').checked;
     LS.set('gfl_plan', PL);
   }
   loadPlan();
   ['fp-from', 'fp-to'].forEach(id => $(id).addEventListener('input', () => { route = null; }));
-  ['fp-from', 'fp-to', 'fp-alt', 'fp-wind', 'fp-taxi', 'fp-extra', 'fp-add'].forEach(id => $(id).addEventListener('change', readPlan));
+  ['fp-from', 'fp-to', 'fp-alt', 'fp-wind', 'fp-taxi', 'fp-extra', 'fp-add', 'fp-awind', 'fp-aalt'].forEach(id => $(id).addEventListener('change', readPlan));
   const msg = (t, c) => { const m = $('fp-msg'); m.textContent = t; m.style.color = c || ''; };
+
+  // ---- default alternates for major hubs (used when Alternate is blank and Auto alternate is on) ----
+  const DEFAULT_ALT = {
+    KATL: 'KCLT', KLAX: 'KSAN', KORD: 'KDTW', KJFK: 'KBOS', KDFW: 'KIAH', KSFO: 'KSMF',
+    EGLL: 'EGKK', LFPG: 'EBBR', EDDF: 'EDDS', EHAM: 'EBBR',
+    OMDB: 'OMAA', WSSS: 'WMKK', RJTT: 'RJAA', RKSI: 'RKPK', VHHH: 'ZGGG'
+  };
+
+  // Typical mean jet-stream headwind (+ = headwind, - = tailwind). Rough planning estimate, not a forecast.
+  function bearing(a, b) {
+    const rad = Math.PI / 180, dLon = (b[1] - a[1]) * rad;
+    const y = Math.sin(dLon) * Math.cos(b[0] * rad);
+    const x = Math.cos(a[0] * rad) * Math.sin(b[0] * rad) - Math.sin(a[0] * rad) * Math.cos(b[0] * rad) * Math.cos(dLon);
+    return Math.atan2(y, x);
+  }
+  function autoWind(a, b) {
+    const lat = Math.abs((a[0] + b[0]) / 2);
+    if (lat < 25 || lat > 70) return 0;
+    const eastness = (Math.sin(bearing(a, b)) + Math.sin(bearing(b, a) + Math.PI)) / 2;   // +1 eastbound, -1 westbound
+    const u = 40 * Math.min(1, (lat - 25) / 15) * (lat > 60 ? 0.7 : 1);                 // mean westerly, kt
+    const scale = F.speed > 700 ? 0.2 : F.speed < 250 ? 0.3 : 1;                         // supersonic flies above the jet stream; light aircraft lower
+    const w = -u * eastness * scale;
+    return Math.round(w > 0 ? w : w * 0.5);                                             // only half credit for tailwinds (conservative)
+  }
 
   function resolve(str, allowBlankAsHere) {
     str = (str || '').trim();
@@ -596,7 +576,6 @@
     let cNm = cT * Math.max(40, cs * ph[3] - wind), dNm = dT * Math.max(40, cs * ph[6] - wind);
     if (cNm + dNm > dist * 0.8) {                      // short hop: squeeze climb/descent
       const k = dist * 0.8 / (cNm + dNm);
-
       cT *= k; dT *= k; cNm *= k; dNm *= k;
     }
     const gs = Math.max(60, cs - wind);
@@ -609,7 +588,9 @@
   function calculate() {
     readPlan();
     const from = resolve(PL.from, true), to = resolve(PL.to, false);
-    const alt = PL.alt ? resolve(PL.alt, false) : undefined;
+    let alt = PL.alt ? resolve(PL.alt, false) : undefined, altTag = '';
+    const autoAltCode = DEFAULT_ALT[PL.to.toUpperCase()];
+    if (!PL.alt && PL.autoAlt && autoAltCode) { altTag = autoAltCode + ', '; alt = AIRPORTS[autoAltCode]; }
     if (!from) { msg(PL.from ? 'Unknown "From": use an ICAO from the built-in list or "lat, lon".' : 'Waiting for the sim — or type a From airport.', '#f87171'); return null; }
     if (!to) { msg(PL.to ? 'Unknown "To": use an ICAO from the built-in list or "lat, lon".' : 'Enter a destination.', '#f87171'); return null; }
     if (PL.alt && !alt) { msg('Unknown alternate: use an ICAO from the built-in list or "lat, lon".', '#f87171'); return null; }
@@ -618,7 +599,9 @@
     else dist = haversineNm(from, to);
     dist *= 1 + PL.extra / 100;
 
-    const tm = tripModel(dist, PL.wind);
+    let wind = PL.wind, windAuto = false;
+    if (PL.autoWind && !PL.wind && dist > 300) { wind = autoWind(from, to); windAuto = true; }
+    const tm = tripModel(dist, wind);
     const taxi = PL.taxi / 60 * F.cruise * tm.ph[8];
     const cont = tm.trip * 0.05;
     const altDist = alt ? haversineNm(to, alt) * 1.05 : 0;
@@ -636,10 +619,10 @@
 
     const row = (a, b, cls) => `<div class="row ${cls || ''}"><span>${a}</span><b>${b}</b></div>`;
     $('fp-out').innerHTML = `<div class="sec">` +
-      row('Distance', n0(dist) + ' nm') + row('Cruise speed', n0(tm.gs) + ' kt') + row('Flight time', fmtHM(tm.hrs)) +
+      row('Distance', n0(dist) + ' nm') + row('Ground speed', n0(tm.gs) + ' kt') + (wind ? row('Wind' + (windAuto ? ' (est.)' : ''), n0(Math.abs(wind)) + ' kt ' + (wind > 0 ? 'head' : 'tail')) : '') + row('Flight time', fmtHM(tm.hrs)) +
       row('Climb / accel', n0(tm.climbLb) + ' lb') + row('Cruise', n0(tm.cruiseLb) + ' lb') + row('Descent', n0(tm.descLb) + ' lb') +
       row('Trip fuel', n0(tm.trip) + ' lb') + row('Taxi', n0(taxi) + ' lb') + row('Contingency (5%)', n0(cont) + ' lb') +
-      (alt ? row('Alternate (' + n0(altDist) + ' nm)', n0(altFuel) + ' lb') : '') +
+      (alt ? row('Alternate (' + altTag + n0(altDist) + ' nm)', n0(altFuel) + ' lb') : '') +
       row('Final reserve (' + F.reserve + ' min)', n0(reserve) + ' lb') + (PL.add ? row('Extra', n0(PL.add) + ' lb') : '') +
       row('BLOCK FUEL', n0(block) + ' lb (' + Math.round(pct) + '%)', 'tot') +
       row('Max range, full tank', n0(maxRange) + ' nm') + `</div>`;
@@ -647,7 +630,6 @@
     else if (!alt && dist > 600) msg('Plan OK — ' + n0(F.cap - block) + ' lb spare. No alternate set: consider adding one.', '#fde047');
     else msg('Plan OK — ' + n0(F.cap - block) + ' lb of spare tank capacity.', '#4ade80');
     return lastPlan;
-
   }
   $('fp-calc').onclick = calculate;
   $('fp-apply').onclick = () => {
