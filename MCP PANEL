@@ -86,6 +86,7 @@
     .disp.sm{gap:3px;border-radius:3px}
     .disp.sm .dg{width:11px;height:16px}
     .disp.dsm .dr span{font-size:16px}
+    .dr span.dot{flex:.35}
     .btn.cc{border-radius:3px}
     .btn.cc .bt{font-size:10px;line-height:1.05;white-space:normal;padding:0 1px}
     .btn.cc.flat.on .bt{color:#ffb340;text-shadow:0 0 6px #ff9a00}
@@ -422,7 +423,7 @@
             <path class="ln" style="stroke-width:1.5;opacity:.45" d="M190,8 V100 M440,8 V100 M8,100 H792"/>
             ${screw(12, 12, 8)}${screw(788, 12, 8)}${screw(12, 203, 8)}${screw(788, 203, 8)}`);
         const labels = [
-            lab('AUTOTHROTTLE', 122, 52, 'xs'), lab('KNOTS', 150, 112, 'xs'), lab('SPEED SELECT', 150, 204, 'xs'),
+            lab('AUTOTHROTTLE', 152, 48, 'xs'), lab('MACH', 35, 59, 'xs'), lab('KNOTS', 150, 112, 'xs'), lab('SPEED SELECT', 150, 204, 'xs'),
             lab('AT1', 28, 204, 'xs'), lab('AT2', 82, 204, 'xs'), lab('FD1', 215, 204, 'xs'), lab('FD2', 660, 204, 'xs'),
             lab('AP1', 410, 112, 'xs'), lab('AP2', 458, 112, 'xs'), lab('AP1', 410, 204, 'xs'), lab('AP2', 458, 204, 'xs'),
             lab('HDG TRK<br>PULL PUSH  1', 290, 204, 'xs'), lab('VOR REF<br>LOC', 372, 204, 'xs'),
@@ -432,6 +433,7 @@
         return `${st}${labels}
         ${bt('btn-machhold', 'MACH<br>HOLD', 35, 32)}${bt('btn-speed', 'IAS<br>HOLD', 86, 32)}${bt('btn-iasacq', 'IAS<br>ACQ', 86, 70)}
         ${disp('disp-ias', 150, 82, 62, 26, 'dsm')}
+        ${disp('disp-mach', 35, 80, 52, 24, 'dsm')}
         ${bt('btn-ins', 'INS', 225, 32)}${bt('btn-trkhdg', 'TRK<br>HDG', 271, 32)}
         ${bt('btn-backbeam', 'BACK<br>BEAM', 225, 70)}${bt('btn-vorloc', 'VOR<br>LOC', 271, 70)}
         ${bt('btn-hdghold', 'HDG<br>HOLD', 326, 32)}${bt('btn-turb', 'TURB', 378, 32)}${bt('btn-pitchhold', 'PITCH<br>HOLD', 428, 32)}
@@ -580,7 +582,7 @@
     // drag the panel by its background
     let isDraggingPanel = false, dragStartX = 0, dragStartY = 0;
     container.addEventListener('mousedown', e => {
-        if (e.target.closest('.btn,.rbtn,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.disengage')) return;
+        if (e.target.closest('.btn,.rbtn,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.tsw,.afs,.afbox,.disengage')) return;
         isDraggingPanel = true;
         dragStartX = e.clientX - container.offsetLeft;
         dragStartY = e.clientY - container.offsetTop;
@@ -601,6 +603,7 @@
     const rot = { ias: 0, hdg: 0, crs: 0, alt: 0, vs: 0 };
     const lastInteractionTime = { ias: 0, hdg: 0, vs: 0, alt: 0, crs: 0 };
     const modeOf = { ias: 'speed', hdg: 'heading', vs: 'verticalSpeed', alt: 'altitude' };
+    let lastSpeedMode = null;
     let bankIdx = 2, atOn = false, fdOn = true, apChannel = 'A';
     const localLit = {};
 
@@ -887,7 +890,8 @@
         setOn('btn-cmda', ap.on && apChannel === 'A');
         setOn('btn-cmdb', ap.on && apChannel === 'B');
         setOn('btn-cmdc', ap.on && apChannel === 'C');
-        setAT(speedOn);
+        // only follow GeoFS when its speed state actually changes, so a manual flick isn't undone
+        if (speedOn !== lastSpeedMode) { lastSpeedMode = speedOn; setAT(speedOn); }
     }
 
     function toggleAP(channel) {
@@ -936,7 +940,26 @@
             if (e) e.addEventListener('click', () => toggleGeoFSMode(REAL_MODES[id]));
         });
         const at = $('atsw');
-        if (at) at.addEventListener('click', () => toggleGeoFSMode('speed'));
+        if (at) {
+            // click = flip, drag up = ARM, drag down = OFF
+            let y0 = null;
+            at.addEventListener('mousedown', e => {
+                if (e.button !== 0) return;
+                y0 = e.clientY;
+                e.stopPropagation();
+                e.preventDefault();
+            });
+            window.addEventListener('mouseup', e => {
+                if (y0 === null) return;
+                const dy = e.clientY - y0;
+                y0 = null;
+                const want = Math.abs(dy) > 6 ? dy < 0 : !atOn;
+                if (want === atOn) return;
+                setAT(want);
+                const geoSpeed = !!(typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.modes && geofs.autopilot.modes.speed);
+                if (geoSpeed !== want) toggleGeoFSMode('speed');
+            });
+        }
 
         LOCAL_LAMPS.forEach(id => {
             const e = $(id);
@@ -1020,9 +1043,26 @@
     }
 
     // ------------------------------------------------------- pull from GeoFS
+    // Mach readout (Concorde layout)
+    function updateMach() {
+        const e = $('disp-mach');
+        if (!e) return;
+        let m = 0;
+        try {
+            if (typeof geofs !== 'undefined' && geofs.animation && geofs.animation.values) m = Number(geofs.animation.values.mach) || 0;
+        } catch (err) {}
+        const t = m.toFixed(2).slice(0, 4);
+        const key = 'M' + t;
+        if (e.dataset.t === key) return;
+        e.dataset.t = key;
+        e.classList.add('drum');
+        e.innerHTML = `<div class="dr">${[...t].map(c => `<span${c === '.' ? ' class="dot"' : ''}>${c}</span>`).join('')}</div>`;
+    }
+
     function pullFromNativeUI() {
         const now = Date.now();
         updateAircraftTheme();
+        updateMach();
 
         try {
             if (typeof geofs !== 'undefined' && geofs.autopilot) {
