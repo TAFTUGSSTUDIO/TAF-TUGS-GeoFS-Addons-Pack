@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MCP PANEL
 // @namespace    http://tampermonkey.net/
-// @version      3
-// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft: 737 style, 747/757/767/777/787 style (drum or LED displays), Airbus FCU, plus Soviet/military/GA/regional colour themes. Everything drawn in SVG/CSS.
+// @version      3.8
+// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft: 737 style, 747/757/767/777/787 style (drum or LED displays), Airbus FCU, Concorde, MD-11, AN-124/225, Tu-144, A350, plus Soviet/military/GA/regional colour themes. Everything drawn in SVG/CSS.
 // @match        https://*.geo-fs.com/geofs.php*
 // @grant        none
 // ==/UserScript==
@@ -48,6 +48,7 @@
     .dg{width:23px;height:32px;flex:none;overflow:visible}
     .dg .off{fill:rgba(255,255,255,.07)}
     .dg .on{fill:var(--disp);filter:drop-shadow(0 0 2.5px var(--disp))}
+
     .dr{display:flex;width:100%;height:100%}
     .dr span{flex:1;display:flex;align-items:center;justify-content:center;font:bold 26px Arial,Helvetica,sans-serif;
         color:var(--disp);border-left:1px solid #3a3a3a;border-right:1px solid #1a1a1a;position:relative;
@@ -82,6 +83,10 @@
     .btn.ab .lamp{top:5px;bottom:auto;width:30px;height:5px;margin-left:-15px;background:#17331a;background-image:none}
     .btn.ab.on .lamp{background:#58ff62;box-shadow:0 0 8px 2px rgba(80,255,90,.7)}
 
+    .disp.led{background:linear-gradient(#030a04,#08140a);border-color:#16241a}
+    .disp.led .dg .on{fill:#8dff3a;filter:drop-shadow(0 0 3px #4dff00)}
+    .disp.s2{gap:4px}
+    .disp.s2 .dg{width:18px;height:27px}
     .disp.blue{background:linear-gradient(#08122a,#0c1a3c);border:2px solid #2a3858}
     .disp.sm{gap:3px;border-radius:3px}
     .disp.sm .dg{width:11px;height:16px}
@@ -98,6 +103,7 @@
     .tsw.on .lv,.tsw.fd .lv{top:4px}
     .tsw.fd.off .lv{top:50%}
     .tsw.on::after{content:'';position:absolute;left:0;right:0;bottom:3px;height:4px;background:#5dff6a;box-shadow:0 0 6px #5dff6a}
+
     .afs{position:absolute;box-sizing:border-box;border-radius:3px;cursor:pointer;border:2px solid #555;
         background:linear-gradient(#f4f1e6,#bfb9a6);box-shadow:0 2px 4px rgba(0,0,0,.6)}
     .afs.on{background:linear-gradient(#c4ffca,#46d058);box-shadow:0 0 8px rgba(60,255,80,.6)}
@@ -132,7 +138,7 @@
 
     .atsw{position:absolute;cursor:pointer}
     .atsw svg{width:100%;height:100%;display:block;overflow:visible}
-    #at-lever{transform-origin:45px 45px;transition:transform .14s ease-out}
+    #at-lever{transform-origin:45px 45px}
     #at-led{position:absolute;box-sizing:border-box;border-radius:3px;background:#17351a;border:1px solid #0a1a0c;
         box-shadow:inset 0 1px 2px #000}
     #at-led.on{background:#52ff44;box-shadow:0 0 9px 2px rgba(80,255,70,.7)}
@@ -148,12 +154,30 @@
     .disengage.press .bar{filter:brightness(.85)}
     .disengage .tt{position:absolute;left:50%;top:-12px;transform:translateX(-50%);padding:0 8px;font-weight:bold;
         font-size:16px;color:var(--txt);background:var(--bg);white-space:nowrap}
+
     .disengage.alert .bar{background:linear-gradient(#ff9a8f,#d9382b)}
     .disengage.plain{border:none;border-radius:0}
     .disengage.plain .tt{top:-24px;background:none;padding:0;font-size:15px}
     .disengage.plain .bar{left:0;right:0;top:0;border-radius:2px 2px 0 0;background:linear-gradient(#f6f0de,#cdc5ae)}
     .disengage.plain.alert .bar{background:linear-gradient(#ff9a8f,#d9382b)}
 
+    /* round lamp buttons (AN-124/225 panel) */
+    .rl{position:absolute;border-radius:50%;box-sizing:border-box;border:3px solid #050505;cursor:pointer;
+        background:radial-gradient(circle at 40% 35%,var(--c1),var(--c2));filter:brightness(.5);
+        box-shadow:inset 0 0 6px #000,0 0 0 2px rgba(0,0,0,.4)}
+    .rl.on{filter:none;box-shadow:inset 0 0 4px rgba(255,255,255,.4),0 0 12px 3px var(--c1)}
+    .rl:active{transform:translateY(1px)}
+
+    .scope{position:absolute;border-radius:50%;cursor:pointer}
+    .scope svg{display:block}
+    .scope .face{fill:#8f979c;stroke:#3a3d40;stroke-width:2}
+    .scope .glow{fill:none;pointer-events:none}
+    .scope.on .face{fill:#efe6a4}
+    .scope.on .glow{fill:url(#scopeGlow)}
+    #scope-ring{transition:transform .25s linear}
+    .rbtn.on{border-color:#5dff6a;box-shadow:inset 0 0 6px #000,0 0 7px #5dff6a}
+    .inop{opacity:.42;filter:saturate(.3) brightness(.8);cursor:not-allowed}
+    .inop:active{transform:none}
     .mcp-toggle-tab{position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:999998;
         --bg:#575b5f;--border:#26282a;--txt:#f3f3f3;
         background:var(--border);color:var(--txt);border:2px solid var(--bg);border-bottom:none;padding:6px 20px;
@@ -198,6 +222,7 @@
         `<div class="vsw" id="wrap-vs" style="${ctr(cx, cy, w, h)}"><div class="wh" id="vs-wheel" style="width:${w - 16}px;height:${h - 18}px"></div></div>`;
 
     const arc = (cx, cy, r, a0, a1) => {
+
         const p = a => [cx + r * Math.sin(a * Math.PI / 180), cy - r * Math.cos(a * Math.PI / 180)];
         const [x0, y0] = p(a0), [x1, y1] = p(a1);
         return `<path class="ln" d="M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 0 ${a1 > a0 ? 1 : 0} ${x1.toFixed(1)},${y1.toFixed(1)}"/>`;
@@ -248,6 +273,7 @@
 
     const altKnurl = (() => { let s = ''; for (let a = 0; a < 360; a += 10) s += `<line x1="50" y1="4" x2="50" y2="10" transform="rotate(${a} 50 50)"/>`; return s; })();
     const svgAlt = `<svg viewBox="0 0 100 100"><defs>
+
         <radialGradient id="gAl" cx="38%" cy="30%" r="80%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
         <g id="dial-alt" class="rot"><circle cx="50" cy="50" r="47" fill="url(#gAl)" stroke="#2a2b2d" stroke-width="2"/>
         <g stroke="#2a2b2d" stroke-width="1.4" opacity=".8">${altKnurl}</g>
@@ -298,6 +324,7 @@
             lab('A/P ENGAGE', 1328, 17, 'sm'), lab('A', 1262, 26, 'sm'), lab('B', 1394, 26, 'sm'),
             lab('F/D', 172, 150, 'sm'), lab('ON', 172, 166, 'sm'), lab('OFF', 172, 234, 'sm'),
             lab('F/D', 1437, 150, 'sm'), lab('ON', 1437, 166, 'sm'), lab('OFF', 1437, 234, 'sm')
+
         ].join('');
         return `${st}${labels}
         ${disp('disp-crsL', 130, 50, 106, 44)}
@@ -333,7 +360,7 @@
     // ============================ LAYOUT: 747 / 757 / 767 / 777 / 787 style
     function build747() {
         const st = svgWrap(1480, 266, `
-            ${ticks(492, 122, [-60, -30, 0, 30, 60], 43, 54)}
+            ${ticks(492, 122, [-90, -60, -30, 0, 30, 60], 43, 54)}
             <path class="ln" d="M248,132 V70 M205,104 L238,72"/>
             <path class="ln" d="M203,192 L170,198 M293,190 L334,197 M290,160 L334,120"/>
             <path class="ln" d="M938,70 V82 M697,70 V94"/>
@@ -348,6 +375,7 @@
             lab('DN', 645, 114, 'sm'), lab('UP', 645, 214, 'sm'), lab('+', 850, 128, 'sm'),
             lab('A/P ENGAGE', 1255, 13, 'sm'), lab('L', 1176, 32, 'xs'), lab('C', 1258, 32, 'xs'), lab('R', 1340, 32, 'xs'),
             lab('F/D<br>ON', 42, 22, 'sm'), lab('OFF', 42, 143, 'sm'), lab('F/D<br>ON', 1420, 22, 'sm'), lab('OFF', 1425, 143, 'sm')
+
         ].join('');
         return `${st}${labels}
         <div class="rsw" id="fd-L" style="${ctr(42, 102, 40, 40)}"><i class="lv"></i></div>
@@ -398,6 +426,7 @@
         ${rbtn('btn-spdmach', 72, 100, 34)}
         ${knob('wrap-ias', 120, 150, 80, svgRound('ias', false, false))}
         ${knob('wrap-hdg', 250, 150, 80, svgRound('hdg', false, true))}
+
         ${rbtn('btn-hdgtrk', 370, 100, 34)}
         ${btn('btn-cmda', 'AP1', 352, 150, 44, 40, 'ab')}${btn('btn-cmdb', 'AP2', 404, 150, 44, 40, 'ab')}
         ${btn('btn-athr', 'A/THR', 378, 198, 52, 40, 'ab')}
@@ -406,7 +435,7 @@
         ${rbtn('btn-metric', 566, 100, 30)}
         ${btn('btn-exped', 500, 204, 54, 40, 'ab')}
         ${knob('wrap-vs', 672, 150, 80, svgRound('vs', false, false))}
-        ${btn('btn-app', 'APPR', 672, 204, 54, 40, 'ab')}`.replace("btn('btn-exped'", "btn('btn-exped'");
+        ${btn('btn-app', 'APPR', 672, 204, 54, 40, 'ab')}`;
     }
 
     // ============================================ LAYOUT: Concorde AFS panel
@@ -448,6 +477,7 @@
         ${knob('wrap-hdg', 268, 178, 36, svgRound('hdg', false, false))}${knob('wrap-crsL', 352, 178, 36, svgRound('crsL', false, false))}
         ${sw('btn-cmda', 410, 152)}${sw('btn-cmdb', 458, 152)}
         ${disp('disp-hdg2', 535, 128, 72, 26, 'dsm')}${disp('disp-crsR', 612, 128, 72, 26, 'dsm')}
+
         ${knob('wrap-hdg2', 512, 178, 36, svgRound('hdg2', false, false))}${knob('wrap-crsR', 598, 178, 36, svgRound('crsR', false, false))}
         ${knob('wrap-alt', 730, 160, 76, svgSlot('alt', true))}`;
     }
@@ -486,20 +516,214 @@
         ${btn('btn-vs', 'V/S', 504, 170, 34, 18, 'flat cc')}`;
     }
 
+    // ================================================ LAYOUT: AN-124 / AN-225
+    function buildAntonov() {
+        const rl = (id, cx, cy, d, c) =>
+            `<div class="rl" id="${id}" style="${ctr(cx, cy, d, d)}--c1:${c[0]};--c2:${c[1]}"></div>`;
+        const sq = (id, l, cx, cy, w = 56, h = 40) => btn(id, l, cx, cy, w, h, 'flat cc');
+        const arcU = (x, y) => `<path d="M${x - 28},${y + 36} Q${x},${y + 56} ${x + 28},${y + 36}" stroke="#e08a50" stroke-width="3" fill="none" stroke-linecap="round"/>`;
+        const G = ['#4dff9a', '#0b5a30'], B = ['#7a7aff', '#17177a'], BR = ['#b0673a', '#3a1a0a'],
+              WH = ['#ffffff', '#9a9ea2'], BL = ['#4db4ff', '#0a3f7a'];
+
+        const st = svgWrap(1400, 380, `
+            <rect x="20"  y="30" width="192" height="320" rx="14" fill="#161c1f" stroke="#050607" stroke-width="3"/>
+            <rect x="238" y="30" width="325" height="320" rx="14" fill="#161c1f" stroke="#050607" stroke-width="3"/>
+            <rect x="596" y="30" width="501" height="320" rx="14" fill="#161c1f" stroke="#050607" stroke-width="3"/>
+            <rect x="1105" y="30" width="275" height="320" rx="10" fill="#5b7a88" stroke="#1e2f37" stroke-width="3"/>
+            <rect x="795" y="83" width="114" height="40" rx="3" fill="#08090a" stroke="#3a3f42" stroke-width="2"/>
+            <rect x="1130" y="52" width="230" height="22" fill="none"/>
+            ${arcU(125, 200)}${arcU(462, 200)}${arcU(1160, 290)}
+            <circle cx="842" cy="213" r="52" fill="#0b0f11" stroke="#2c3236" stroke-width="2"/>
+            <path d="M842,213 L822,195" stroke="#8c9296" stroke-width="12" stroke-linecap="round"/>`);
+
+        const labels = [
+            lab('V app', 128, 55, 'sm'), lab('KM/H', 135, 130, 'xs'),
+            lab('BOTM ECHELON', 468, 66, 'xs'), lab('METERS', 468, 128, 'xs'),
+            lab('VRTCL VEL', 322, 252, 'xs'),
+            lab('DAY', 392, 282, 'xs'), lab('NIGHT', 392, 335, 'xs'), lab('ECHELON', 459, 274, 'xs'),
+            lab('ER', 664, 70, 'sm'), lab('AT', 660, 158, 'sm'), lab('APM', 653, 238, 'sm'),
+            lab('VOR1', 759, 165, 'xs'), lab('COURSE II', 746, 192, 'xs'), lab('COURSE I', 742, 222, 'xs'),
+            lab('VOR2', 925, 168, 'xs'), lab('NAVIG', 945, 201, 'xs'), lab('APPROACH', 944, 231, 'xs'),
+            lab('HORIZ', 753, 286, 'xs'), lab('PC', 842, 288, 'xs'), lab('VRTCL', 931, 294, 'xs'),
+            lab('HIGH', 1042, 78, 'sm'), lab('MAX', 1038, 170, 'sm'), lab('VEL', 1040, 260, 'sm'),
+            `<div class="lab xs" style="left:1155px;top:62px;color:#0c1a20">VOR1 &nbsp;VOR2 &nbsp;APK1 &nbsp;APK2</div>`,
+            `<div class="lab xs" style="left:1180px;top:170px;color:#0c1a20">M &nbsp;&nbsp;S</div>`,
+            `<div class="lab xs" style="left:1245px;top:228px;color:#0c1a20">HDG</div>`
+        ].join('');
+
+        return `${st}${labels}
+        ${disp('disp-ias', 135, 95, 100, 42)}
+        ${knob('wrap-ias', 125, 200, 80, svgSpeed)}
+
+        ${vsw(322, 150, 66, 180)}
+        ${disp('disp-alt', 468, 98, 140, 46)}
+        ${knob('wrap-alt', 462, 195, 80, svgAlt)}
+        ${btn('btn-at2', 'Нз', 322, 303, 52, 52, 'flat cc')}
+        <div class="fdsw" id="fd-L" style="${ctr(392, 306, 26, 44)}"><i class="lv" style="height:16px"></i></div>
+        ${btn('btn-ias2', 'Vy', 459, 305, 52, 52, 'flat cc')}
+
+        ${rl('btn-cmda', 660, 103, 50, G)}
+        ${rl('btn-athr', 653, 195, 44, G)}
+        ${rl('btn-cmdb', 647, 272, 44, G)}
+        ${knob('wrap-crsL', 842, 213, 100, svgRound('crsL', true, false))}
+        ${rl('btn-hdghold', 753, 318, 40, G)}${rl('btn-althld', 842, 325, 44, BL)}${rl('btn-vs', 931, 327, 40, G)}
+        ${rl('btn-lvlchg', 1040, 115, 50, B)}${rl('btn-n1', 1036, 207, 50, BR)}${rl('btn-speed', 1030, 297, 50, WH)}
+
+        ${disp('disp-alt2', 1245, 112, 230, 62, 'led')}
+        ${disp('disp-hdg', 1245, 195, 110, 40, 'led')}
+        ${knob('wrap-hdg', 1160, 280, 72, svgRound('hdg', true, false))}
+        ${sq('btn-loc', 'LOC', 1245, 275)}${sq('btn-app', 'APP', 1325, 275)}
+        ${sq('btn-nav', 'NAV', 1245, 322)}${sq('btn-flch', 'FLCH', 1325, 322)}`;
+    }
+
+    // lit round scope of the Tu-144 (cream map screen); compass ring turns with heading
+    function scopeHTML(cx, cy, d) {
+        let t = '';
+        for (let a = 0; a < 360; a += 5) {
+            const long = a % 30 === 0, r0 = long ? 124 : 132, r1 = 142;
+            const sn = Math.sin(a * Math.PI / 180), cs = Math.cos(a * Math.PI / 180);
+            t += `<path d="M${(r0 * sn).toFixed(1)},${(-r0 * cs).toFixed(1)} L${(r1 * sn).toFixed(1)},${(-r1 * cs).toFixed(1)}" stroke="#2a2a22" stroke-width="${long ? 2.4 : 1.2}"/>`;
+            if (long) t += `<text x="${(108 * sn).toFixed(1)}" y="${(-108 * cs + 5).toFixed(1)}" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#2a2a22" transform="rotate(${a} ${(108 * sn).toFixed(1)} ${(-108 * cs).toFixed(1)})">${a / 10}</text>`;
+        }
+        return `<div class="scope on" id="tu-scope" style="${ctr(cx, cy, d, d)}"><svg viewBox="-160 -160 320 320" width="${d}" height="${d}">
+            <defs><radialGradient id="scopeGlow"><stop offset="0" stop-color="rgba(255,255,220,.35)"/><stop offset=".7" stop-color="rgba(255,255,200,0)"/><stop offset="1" stop-color="rgba(120,90,0,.25)"/></radialGradient></defs>
+            <circle r="158" fill="#0c0d0e"/>
+            <circle class="face" r="146"/>
+            <circle r="146" fill="none" stroke="rgba(0,0,0,.25)" stroke-width="3"/>
+            <circle r="48" fill="none" stroke="rgba(60,50,10,.28)" stroke-dasharray="4 5"/>
+            <circle r="96" fill="none" stroke="rgba(60,50,10,.28)" stroke-dasharray="4 5"/>
+            <g id="scope-ring">${t}</g>
+            <path d="M0,-146 V0" stroke="#1d1f21" stroke-width="3"/>
+            <path d="M0,-18 L9,10 L0,5 L-9,10Z" fill="#1d1f21"/>
+            <circle class="glow" r="146"/></svg></div>
+        `;
+    }
+    let scopeAng = 0;
+    function updateScope() {
+        const g = $('scope-ring');
+        if (!g) return;
+        const h = getPlaneHeading();
+        if (h === null) return;
+        const delta = ((-h - scopeAng + 540) % 360 + 360) % 360 - 180;
+        scopeAng += delta;
+        g.style.transform = `rotate(${scopeAng}deg)`;
+    }
+
+    // ====================================================== LAYOUT: Tu-144
+    function buildTu144() {
+        const WH = '#f1f1ea';
+        const labC = (t, x, y, cls = 'xs', c = WH) => `<div class="lab ${cls}" style="left:${x}px;top:${y}px;color:${c}">${t}</div>`;
+        const rl = (id, cx, cy, d, c) => `<div class="rl" id="${id}" style="${ctr(cx, cy, d, d)}--c1:${c[0]};--c2:${c[1]}"></div>`;
+        const AM = ['#ffb347', '#7a4a08'], G = ['#5dff7a', '#0b5a30'], R = ['#ff6a5a', '#6a1008'];
+        const ang = Array.from({ length: 60 }, (_, i) => i * 6);
+        const st = svgWrap(1420, 410, `
+            ${screw(14, 14, 8)}${screw(1406, 14, 8)}${screw(14, 396, 8)}${screw(1406, 396, 8)}
+            <rect x="385" y="50" width="370" height="330" rx="8" fill="#0d0e0f" stroke="#07090a" stroke-width="3"/>
+            <rect x="770" y="50" width="230" height="330" rx="8" fill="#0d0e0f" stroke="#07090a" stroke-width="3"/>
+            <path d="M770,60 V370" stroke="#e8e8e0" stroke-width="2"/>`);
+        const ring = [['Кпр1', -150], ['Кпр2', -122], ['Кпр3', -96], ['Кпр зад', -68], ['MK1', -28], ['MK2', 12],
+                      ['MK3', 46], ['ИК', 80], ['Кпнп1', 112], ['Кпнп2', 146], ['ОТКЛ', 180]]
+            .map(([t, a]) => labC(t, (520 + 84 * Math.sin(a * Math.PI / 180)).toFixed(0), (270 - 84 * Math.cos(a * Math.PI / 180)).toFixed(0))).join('');
+        const labels = [
+            lab('МАРШ / АЭР', 60, 315, 'xs'),
+            labC('КУРС', 450, 135, 'sm'), ring,
+            labC('МАГНИТНОЕ', 885, 85, 'sm'), labC('СКЛОНЕНИЕ', 885, 106, 'sm'),
+            labC('−', 835, 232, 'sm'), labC('+', 935, 232, 'sm'),
+            lab('СКОРОСТЬ', 1090, 62, 'xs'), lab('ВЫСОТА', 1210, 62, 'xs'), lab('ВЕРТ. СК.', 1330, 62, 'xs'),
+            lab('ДЕРЖ', 1090, 325, 'xs'), lab('ДЕРЖ', 1210, 325, 'xs'), lab('ДЕРЖ', 1330, 325, 'xs'),
+            lab('АП', 1170, 372, 'sm'), lab('АТ', 1300, 372, 'sm')
+        ].join('');
+        return `${st}${labels}
+        ${scopeHTML(210, 205, 320)}
+        <div class="fdsw" id="fd-L" style="${ctr(60, 350, 34, 46)}"><i class="lv"></i></div>
+
+        ${disp('disp-hdg', 590, 130, 150, 52)}
+        ${knob('wrap-crsL', 520, 270, 100, svgRound('crsL', true, false))}
+        <div class="btn flat cc" id="btn-sync" style="${ctr(655, 315, 100, 60)}background:linear-gradient(#ffe97a,#d9b92f)"><span class="bt" style="color:#1a1a1a;font-size:13px">СОГЛАС.<br>Кпр</span><i class="lamp"></i></div>
+        ${rl('btn-hdghold', 700, 215, 34, G)}
+
+        ${disp('disp-crsR', 885, 160, 110, 44)}
+        ${knob('wrap-crsR', 885, 275, 86, svgRound('crsR', true, false))}
+
+        ${disp('disp-ias', 1090, 100, 90, 44)}
+        ${disp('disp-alt', 1210, 100, 112, 44)}
+        ${disp('disp-vs', 1330, 100, 100, 44)}
+        ${knob('wrap-ias', 1090, 200, 84, svgSpeed)}
+        ${knob('wrap-alt', 1210, 200, 84, svgAlt)}
+        ${knob('wrap-vs', 1330, 200, 84, svgRound('vs', true, false))}
+        ${rl('btn-speed', 1090, 290, 44, AM)}${rl('btn-althld', 1210, 290, 44, AM)}${rl('btn-vs', 1330, 290, 44, AM)}
+        ${rl('btn-cmda', 1130, 372, 40, R)}${rl('btn-athr', 1260, 372, 40, G)}`;
+    }
+
+    // ====================================================== LAYOUT: A350 FCU
+    function buildA350() {
+        const BL = '#cfe4ff';
+        const labC = (t, x, y, cls = 'xs', c = BL) => `<div class="lab ${cls}" style="left:${x}px;top:${y}px;color:${c}">${t}</div>`;
+        const cream = (id, ring, star) => {
+            let pts = '';
+            if (star) for (let i = 0; i < 32; i++) {
+                const a = i * 360 / 32 * Math.PI / 180, r = i % 2 ? 40 : 49;
+                pts += `${(50 + r * Math.sin(a)).toFixed(1)},${(50 - r * Math.cos(a)).toFixed(1)} `;
+            }
+            return `<svg viewBox="0 0 100 100"><defs>
+                <radialGradient id="gCm${id}" cx="38%" cy="30%" r="80%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
+                ${star ? `<polygon points="${pts}" fill="none" stroke="#f1f1f1" stroke-width="2" stroke-linejoin="round"/>` : ''}
+                ${ring ? '<circle cx="50" cy="50" r="47" fill="#0f1114" stroke="#f1f1f1" stroke-width="3"/>' : ''}
+                <g id="dial-${id}" class="rot"><circle cx="50" cy="50" r="${star ? 31 : 36}" fill="url(#gCm${id})" stroke="#7a7566" stroke-width="1.5"/>
+                <circle cx="50" cy="50" r="${star ? 22 : 26}" fill="none" stroke="rgba(0,0,0,.12)" stroke-width="1.5"/>
+                <rect x="48.5" y="${star ? 22 : 17}" width="3" height="8" rx="1.5" fill="#8a8574"/></g></svg>`;
+        };
+        const ab = (id, cx, cy) => btn(id, '▲', cx, cy, 46, 40, 'ab');
+        const st = svgWrap(720, 300, `
+            <rect x="33" y="82" width="257" height="60" rx="4" fill="#05070a" stroke="#1b2230" stroke-width="3"/>
+            <rect x="412" y="82" width="257" height="60" rx="4" fill="#05070a" stroke="#1b2230" stroke-width="3"/>
+            <path class="ln" style="stroke-width:1.5;opacity:.5" d="M292,150 V288 M416,150 V288"/>
+            ${arc(618, 207, 50, -130, -50)}
+            ${screw(684, 42, 8)}${screw(158, 262, 7)}${screw(308, 268, 7)}${screw(544, 262, 7)}`);
+        const labels = [
+            lab('MACH', 48, 47, 'xs'), lab('SPD', 122, 47, 'xs'), lab('TRUE', 190, 47, 'xs'), lab('MAG', 268, 47, 'xs'),
+            lab('HDG', 330, 40, 'xs'), lab('V/S', 372, 40, 'xs'), lab('TRK', 322, 94, 'xs'), lab('FPA', 376, 94, 'xs'),
+            lab('METER', 512, 47, 'xs'),
+            labC('MACH SPD', 78, 92), labC('TRUE HDG TRK', 215, 92), labC('ALT', 470, 92), labC('FPA V/S', 610, 92),
+            labC('KT', 160, 126, 'sm', '#fff'), labC('°', 274, 118, 'sm', '#fff'),
+            lab('AP1', 349, 111, 'xs'), lab('AP2', 322, 178, 'xs'), lab('A/THR', 381, 178, 'xs'), lab('APPR', 349, 244, 'xs'),
+            lab('100', 446, 158, 'xs'), lab('1000', 500, 158, 'xs'),
+            lab('UP', 580, 172, 'xs'), lab('DN', 580, 238, 'xs')
+        ].join('');
+        return `${st}${labels}
+        ${rbtn('btn-spdmach', 82, 47, 30)}${rbtn('btn-truemag', 230, 47, 30)}${rbtn('btn-hdgtrk', 349, 68, 34)}${rbtn('btn-metric', 472, 47, 30)}
+        ${disp('disp-ias', 110, 123, 104, 38, 'lcd s2')}
+        ${disp('disp-hdg', 232, 123, 108, 38, 'lcd s2')}
+        ${disp('disp-alt', 475, 123, 126, 38, 'lcd s2')}
+        ${disp('disp-vs', 605, 123, 124, 38, 'lcd s2')}
+        ${knob('wrap-ias', 88, 203, 76, cream('ias', true, false))}
+        ${knob('wrap-hdg', 228, 203, 92, cream('hdg', false, true))}
+        ${knob('wrap-alt', 473, 203, 88, cream('alt', true, false))}
+        ${knob('wrap-vs', 618, 207, 66, cream('vs', false, false))}
+        ${ab('btn-cmda', 349, 133)}${ab('btn-cmdb', 322, 203)}${ab('btn-athr', 381, 203)}${ab('btn-app', 349, 267)}
+        ${ab('btn-hdghold', 230, 271)}${ab('btn-althld', 471, 271)}${ab('btn-vs', 620, 271)}`;
+    }
+
     const LAYOUTS = {
-        concorde: { name: 'concorde', drum: true, W: 800, H: 215, scale: 1.30, iasW: 3, vsStyle: 'blank', bankMin: 0, bankStep: 0, build: buildConcorde },
-        md11:     { name: 'md11', W: 600, H: 190, scale: 1.60, iasW: 3, vsStyle: 'signed', bankMin: 0, bankStep: 0, build: buildMD11 },
-        b737:   { name: 'b737',   W: 1592, H: 253, scale: 0.72, iasW: 4, vsStyle: 'signed', bankMin: -55, bankStep: 27.5, build: build737 },
-        b747:   { name: 'b747', drum: true,   W: 1480, H: 266, scale: 0.80, iasW: 3, vsStyle: 'blank',  bankMin: -60, bankStep: 30,   build: build747 },
-        airbus: { name: 'airbus', W: 810,  H: 228, scale: 1.30, iasW: 3, vsStyle: 'signed', bankMin: 0,   bankStep: 0,    build: buildAirbus }
+        concorde: { name: 'concorde', drum: true, W: 800, H: 215, scale: 1.30, iasW: 3, vsStyle: 'blank',  build: buildConcorde },
+        md11:     { name: 'md11', W: 600, H: 190, scale: 1.60, iasW: 3, vsStyle: 'signed', banks: [null, 5, 10, 15, 20, 25], bankAngles: [0, 60, 120, 180, 240, 300], bankDefault: 0, capR: 0.5, build: buildMD11 },
+        b737:   { name: 'b737',   W: 1592, H: 253, scale: 0.72, iasW: 4, vsStyle: 'signed', banks: [10, 15, 20, 25, 30], bankAngles: [-55, -27.5, 0, 27.5, 55], bankDefault: 4, capR: 0.5, build: build737 },
+        b747:   { name: 'b747', drum: true,   W: 1480, H: 266, scale: 0.80, iasW: 3, vsStyle: 'blank',  banks: [null, 5, 10, 15, 20, 25], bankAngles: [-90, -60, -30, 0, 30, 60], bankDefault: 0, capR: 0.56, build: build747 },
+        airbus: { name: 'airbus', W: 810,  H: 228, scale: 1.30, iasW: 3, vsStyle: 'signed',  build: buildAirbus },
+        tu144: { name: 'tu144', drum: true, W: 1420, H: 410, scale: 0.7, iasW: 3, vsStyle: 'signed', build: buildTu144 },
+        a350: { name: 'a350', W: 720, H: 300, scale: 1.30, iasW: 3, vsStyle: 'signed', build: buildA350 },
+        antonov: { name: 'antonov', drum: true, W: 1400, H: 380, scale: 0.72, iasW: 3, vsStyle: 'signed',  build: buildAntonov }
     };
 
     // ------------------------------------------------ AIRCRAFT PANEL COLOURS
-    // layout: b737 | b747 | airbus     dtype: led | drum
+    // layout: b737 | b747 | airbus | ...    dtype: led | drum
     // bg/border = panel paint, txt = legend colour, disp = lit digit colour, k1/k2 = knob highlight/shadow
     const th = o => Object.assign({ layout: 'b737', dtype: 'led', face: '#17181a' }, o);
+
     const THEMES = {
         AIRBUS:         th({ layout: 'airbus', bg: '#4f5c67', border: '#23292e', txt: '#eef2f5', disp: '#f4f4f2', k1: '#cfd3d8', k2: '#7a8189' }),
+        // A350: dark blue-grey FCU, cream knobs, white LCD digits
+        AIRBUS350:      th({ layout: 'a350', bg: '#4a5a72', border: '#1b2230', txt: '#eef2f7', disp: '#ffffff', k1: '#f6f1dd', k2: '#bcb59d' }),
         BOEING_NG:      th({ bg: '#575b5f', border: '#26282a', txt: '#f3f3f3', disp: '#f6f6f6', k1: '#a7a9ab', k2: '#5a5d60' }),
         // 777 / 787 / 747-8: warm grey-beige, LED digits, green lit legends
         BOEING_WIDE:    th({ layout: 'b747', dtype: 'led', bg: '#8c877b', border: '#2f2c27', txt: '#f5f3ee', disp: '#f7f7f4', k1: '#f2ecd8', k2: '#a8a08a' }),
@@ -510,6 +734,10 @@
         BOEING_CLASSIC: th({ bg: '#6a7463', border: '#2a2f26', txt: '#fbfbf4', disp: '#ff8a2a', k1: '#a3ab9b', k2: '#575f50' }),
         MD_DC:          th({ layout: 'md11', bg: '#6a665c', border: '#2b2926', txt: '#f2efe6', disp: '#ffa530', k1: '#a8a49a', k2: '#59564e' }),
         CONCORDE:       th({ layout: 'concorde', dtype: 'drum', bg: '#30363b', border: '#08080a', txt: '#e8e6df', disp: '#f4f1e6', k1: '#6e6e70', k2: '#2c2c2e' }),
+        // AN-124 / AN-225: black panels with teal ALT/HDG section, mechanical drums
+        ANTONOV:        th({ layout: 'antonov', dtype: 'drum', bg: '#161b1e', border: '#050607', txt: '#eea67c', disp: '#f2f2f2', k1: '#6a7075', k2: '#1a1d20' }),
+        // Tu-144: bright turquoise panel, black instrument blocks
+        TU144:          th({ layout: 'tu144', dtype: 'drum', bg: '#17b3b8', border: '#0a4f53', txt: '#0a1f21', disp: '#f2f2f2', k1: '#5a5d60', k2: '#141516' }),
         SOVIET_TEAL:    th({ bg: '#8fb2a6', border: '#3a554d', txt: '#10211c', disp: '#ff6a2a', k1: '#aab8b3', k2: '#55635e' }),
         SOVIET_FIGHTER: th({ bg: '#5b8e93', border: '#243d41', txt: '#08191b', disp: '#9dff6a', k1: '#9bb7ba', k2: '#4a6568' }),
         MIL_DARK:       th({ bg: '#33383e', border: '#141619', txt: '#d9dde0', disp: '#7dff6a', k1: '#7d838a', k2: '#3c4147' }),
@@ -525,9 +753,12 @@
     THEMES.DEFAULT = THEMES.BOEING_NG;
 
     const THEME_RULES = [
+        [/\btu[- ]?144|concordski/, 'TU144'],
+        [/\ban[- ]?(124|225)\b|ruslan|mriya/, 'ANTONOV'],
         [/concorde/, 'CONCORDE'],
         [/\ban[- ]?(12[0-9]|22[0-9]|7[0-9]|2|3|26|32|148)\b|antonov|ilyushin|\bil[- ]?\d|tupolev|\btu[- ]?\d|\byak[- ]?\d/, 'SOVIET_TEAL'],
         [/\bsu[- ]?\d|sukhoi|\bmig[- ]?\d/, 'SOVIET_FIGHTER'],
+        [/a350|a35k|a359|a351/, 'AIRBUS350'],
         [/a220|a318|a319|a320|a321|a330|a340|a350|a380|a400|airbus|\bbd-500/, 'AIRBUS'],
         [/747-?8|777|787|dreamliner/, 'BOEING_WIDE'],
         [/737-?(100|200)|727|720|707|\bdc-?[89]\b|\bmd-?8\d/, 'BOEING_CLASSIC'],
@@ -548,6 +779,7 @@
     // ------------------------------------------------------------ DOM setup
     const container = document.createElement('div');
     container.id = 'geofs-mcp-container';
+
     container.innerHTML = '<div id="mcp-stage"></div>';
     document.body.appendChild(container);
     const stage = $('mcp-stage');
@@ -571,6 +803,15 @@
         container.style.display = container.style.display === 'block' ? 'none' : 'block';
     });
 
+    // right-click the tab: toggle "hide buttons GeoFS can't do"
+    tab.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        OPT.hideInop = !OPT.hideInop;
+        try { localStorage.setItem('geofs-mcp-hide-inop', OPT.hideInop ? '1' : '0'); } catch (err) {}
+        updateTabText();
+        buildLayout(curTheme.layout);
+    });
+
     // Alt + scroll over the panel resizes it
     container.addEventListener('wheel', e => {
         if (!e.altKey) return;
@@ -582,7 +823,7 @@
     // drag the panel by its background
     let isDraggingPanel = false, dragStartX = 0, dragStartY = 0;
     container.addEventListener('mousedown', e => {
-        if (e.target.closest('.btn,.rbtn,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.tsw,.afs,.afbox,.disengage')) return;
+        if (e.target.closest('.btn,.rbtn,.rl,.scope,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.tsw,.afs,.afbox,.disengage')) return;
         isDraggingPanel = true;
         dragStartX = e.clientX - container.offsetLeft;
         dragStartY = e.clientY - container.offsetTop;
@@ -598,16 +839,17 @@
     window.addEventListener('mouseup', () => { isDraggingPanel = false; });
 
     // ---------------------------------------------------------------- values
+
     const values = { ias: 250, hdg: 270, vs: 0, alt: 5000, crs: 0 };
     const STEP = { ias: 1, hdg: 1, crs: 1, vs: 100, alt: 100 };
     const rot = { ias: 0, hdg: 0, crs: 0, alt: 0, vs: 0 };
     const lastInteractionTime = { ias: 0, hdg: 0, vs: 0, alt: 0, crs: 0 };
     const modeOf = { ias: 'speed', hdg: 'heading', vs: 'verticalSpeed', alt: 'altitude' };
-    let lastSpeedMode = null;
-    let bankIdx = 2, atOn = false, fdOn = true, apChannel = 'A';
+    let lastSpeedMode = null, atLockUntil = 0;
+    let bankIdx = 0, atOn = false, fdOn = true, apChannel = 'A', atAngle = 180;
     const localLit = {};
 
-    const dispIds = { ias: ['disp-ias'], hdg: ['disp-hdg', 'disp-hdg2'], alt: ['disp-alt'], vs: ['disp-vs'], crs: ['disp-crsL', 'disp-crsR'] };
+    const dispIds = { ias: ['disp-ias'], hdg: ['disp-hdg', 'disp-hdg2'], alt: ['disp-alt', 'disp-alt2'], vs: ['disp-vs'], crs: ['disp-crsL', 'disp-crsR'] };
     const dialIds = { ias: ['dial-ias'], hdg: ['dial-hdg', 'dial-hdg2'], alt: ['dial-alt'], crs: ['dial-crsL', 'dial-crsR'] };
     const isDrum = () => !!curTheme && curTheme.dtype === 'drum';
 
@@ -626,10 +868,13 @@
     }
 
     function renderDisp(p) {
-        const t = fmt(p), drum = isDrum(), key = (drum ? 'D' : 'L') + t;
+        const t = fmt(p), gdrum = isDrum();
         (dispIds[p] || []).forEach(id => {
             const e = $(id);
-            if (!e || e.dataset.t === key) return;
+            if (!e) return;
+            const drum = gdrum && !e.classList.contains('led');
+            const key = (drum ? 'D' : 'L') + t;
+            if (e.dataset.t === key) return;
             e.dataset.t = key;
             if (layout.drum) e.classList.toggle('drum', drum);
             e.innerHTML = (drum && layout.drum)
@@ -648,19 +893,28 @@
             if (g) g.style.transform = `rotate(${rot.vs}deg)`;
         } else {
             (dialIds[p] || []).forEach(id => {
+
                 const g = $(id);
                 if (g) g.style.transform = `rotate(${rot[p]}deg)`;
             });
         }
     }
 
-    function setBank(i) {
-        bankIdx = Math.min(4, Math.max(0, i));
+    function setBank(i, user) {
+        if (!layout.banks) return;
+        bankIdx = Math.min(layout.banks.length - 1, Math.max(0, i));
+        if (user) bankTouched = true;
         const g = $('dial-bank');
-        if (g) g.style.transform = `rotate(${layout.bankMin + bankIdx * layout.bankStep}deg)`;
+        if (g) g.style.transform = `rotate(${layout.bankAngles[bankIdx]}deg)`;
+        const k = $('wrap-hdg');
+        if (k) k.title = 'Bank limit: ' + (layout.banks[bankIdx] === null ? 'AUTO' : layout.banks[bankIdx] + '°') +
+            '  (click the outer ring, shift+wheel or right-click to change)';
+        applyBankLimit();
     }
 
     function changeValue(param, amount) {
+        if (param === 'hdg' && lnav.on) stopLNAV();
+        if (param === 'vs' && flch.on) stopFLCH(false);
         const oldVal = values[param];
         let val = oldVal + amount;
         if (param === 'ias') val = Math.max(val, 0);
@@ -678,6 +932,171 @@
         updateDisplay(param, diff);
         if (param !== 'crs') pushValuesToGeoFS();
     }
+
+    // ------------------------------------------------------------ OPTIONS
+    // Right-click the "MCP PANEL" tab: show all buttons  <->  hide buttons GeoFS cannot do
+    const OPT = { hideInop: false };
+    try { OPT.hideInop = localStorage.getItem('geofs-mcp-hide-inop') === '1'; } catch (e) {}
+    function updateTabText() {
+        tab.textContent = '🎛️ MCP PANEL' + (OPT.hideInop ? ' · active buttons only' : '');
+    }
+
+    // ---------------------------------------------------------- BANK LIMIT
+    let bankTouched = false, bankDef = null, bankOrig = null;
+    function applyBankLimit() {
+        if (!bankTouched || !layout.banks) return;
+        try {
+            if (typeof geofs === 'undefined' || !geofs.autopilot) return;
+            const def = geofs.autopilot.definition;
+            if (!def || typeof def.maxBankAngle !== 'number') return;
+            if (bankDef !== def) { bankDef = def; bankOrig = def.maxBankAngle; }
+            const deg = layout.banks[bankIdx];
+            const want = (deg === null || deg === undefined) ? bankOrig : deg;
+            if (def.maxBankAngle !== want) def.maxBankAngle = want;
+        } catch (e) {}
+    }
+
+    // ------------------------------------- real functions for some buttons
+    const flch = { on: false }, lnav = { on: false, idx: 0 };
+    const FLCH_IDS = ['btn-lvlchg', 'btn-flch'], LNAV_IDS = ['btn-lnav', 'btn-nav'];
+    const apOn = () => !!(typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.on);
+    const apModes = () => (typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.modes) || {};
+
+    function getAltFt() {
+        try {
+            const v = geofs.animation.values;
+            if (typeof v.altitude === 'number') return v.altitude;
+            const l = geofs.aircraft.instance.llaLocation;
+            if (l) return l[2] * 3.28084;
+        } catch (e) {}
+        return null;
+    }
+    function ownPos() {
+        try {
+            const l = geofs.aircraft.instance.llaLocation;
+            if (l && isFinite(l[0]) && isFinite(l[1])) return { lat: l[0], lon: l[1] };
+        } catch (e) {}
+        return null;
+    }
+    function fpWaypoints() {
+        try {
+            const fp = geofs.flightPlan;
+            const a = fp && (fp.waypointArray || fp.waypoints);
+            return Array.isArray(a) ? a.filter(w => w && isFinite(w.lat) && isFinite(w.lon)) : [];
+        } catch (e) { return []; }
+    }
+    const rad = d => d * Math.PI / 180;
+    function distNm(a, b) {
+        const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+        return 2 * 3440.065 * Math.asin(Math.min(1, Math.sqrt(h)));
+    }
+    function bearingDeg(a, b) {
+        const dLon = rad(b.lon - a.lon);
+        const y = Math.sin(dLon) * Math.cos(rad(b.lat));
+        const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(dLon);
+        return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+    function setVal(key, val) {
+        let diff = val - values[key];
+        if (key === 'hdg') { if (diff > 180) diff -= 360; if (diff < -180) diff += 360; }
+        values[key] = val;
+        lastInteractionTime[key] = Date.now();
+        updateDisplay(key, diff);
+    }
+    function flashBad(ids) {
+        ids.forEach(id => {
+            const e = document.getElementById(id);
+            if (!e) return;
+            e.style.outline = '3px solid #ff4a3d';
+            setTimeout(() => { e.style.outline = ''; }, 700);
+        });
+    }
+    function syncRealLamps() {
+        FLCH_IDS.forEach(id => setOn(id, flch.on));
+        LNAV_IDS.forEach(id => setOn(id, lnav.on));
+    }
+
+    // FLCH / LVL CHG: climb or descend to the ALT window, then capture it with altitude hold
+    function toggleFLCH() {
+        if (flch.on) { stopFLCH(false); return; }
+        const alt = getAltFt();
+        if (alt === null || typeof geofs === 'undefined' || !geofs.autopilot) { flashBad(FLCH_IDS); return; }
+        flch.on = true;
+        if (!apModes().verticalSpeed) toggleGeoFSMode('verticalSpeed');
+        syncRealLamps();
+        flchStep();
+    }
+    function flchStep() {
+        const alt = getAltFt();
+        if (alt === null) return;
+        const diff = values.alt - alt;
+        if (Math.abs(diff) <= 150) { stopFLCH(true); return; }
+        const rate = Math.min(diff > 0 ? 2500 : 2000, Math.max(500, Math.abs(diff) * 0.8));
+        const vs = Math.sign(diff) * Math.round(rate / 100) * 100;
+        if (values.vs !== vs) {
+            setVal('vs', vs);
+            pushValuesToGeoFS();
+            try { if (typeof geofs.autopilot.setClimbrate === 'function') geofs.autopilot.setClimbrate(vs); } catch (e) {}
+        } else {
+            lastInteractionTime.vs = Date.now();
+        }
+    }
+    function stopFLCH(captured) {
+        if (!flch.on) return;
+        flch.on = false;
+        if (apOn()) {
+            if (apModes().verticalSpeed) toggleGeoFSMode('verticalSpeed');
+            if (captured && !apModes().altitude) toggleGeoFSMode('altitude');
+        }
+        syncRealLamps();
+    }
+
+    // L NAV / NAV: steer along the GeoFS flight plan (if one is loaded)
+    function toggleLNAV() {
+        if (lnav.on) { stopLNAV(); return; }
+        const wps = fpWaypoints(), pos = ownPos();
+        if (!wps.length || !pos || typeof geofs === 'undefined' || !geofs.autopilot) { flashBad(LNAV_IDS); return; }
+        let best = 0, bd = Infinity;
+        wps.forEach((w, i) => { const d = distNm(pos, w); if (d < bd) { bd = d; best = i; } });
+        lnav.idx = bd < 1.5 ? best + 1 : best;
+        lnav.on = true;
+        if (!apModes().heading) toggleGeoFSMode('heading');
+        syncRealLamps();
+        lnavStep();
+    }
+    function lnavStep() {
+        const wps = fpWaypoints(), pos = ownPos();
+        const wp = wps[lnav.idx];
+        if (!wp || !pos) { stopLNAV(); return; }
+        if (distNm(pos, wp) < 1.2) { lnav.idx++; return; }
+        const hdg = Math.round(bearingDeg(pos, wp)) % 360;
+        if (values.hdg !== hdg) { setVal('hdg', hdg); pushValuesToGeoFS(); }
+        else lastInteractionTime.hdg = Date.now();
+    }
+    function stopLNAV() {
+        if (!lnav.on) return;
+        lnav.on = false;
+        syncRealLamps();
+    }
+    function navTick() {
+        if (!flch.on && !lnav.on) return;
+        if (!apOn()) { flch.on = false; lnav.on = false; syncRealLamps(); return; }
+        if (flch.on) flchStep();
+        if (lnav.on) lnavStep();
+    }
+
+    // SPD INTV / ALT INTV: change the knob step (1 <-> 10 kt, 100 <-> 1000 ft)
+    function toggleIntv(kind) {
+        if (kind === 'spd') { STEP.ias = STEP.ias === 1 ? 10 : 1; setOn('btn-spdintv', STEP.ias > 1); }
+        else { STEP.alt = STEP.alt === 100 ? 1000 : 100; setOn('btn-altintv', STEP.alt > 100); }
+    }
+
+    // Buttons GeoFS cannot do: dimmed (or hidden with the tab right-click option) and inert
+    const INOP = ['btn-n1', 'btn-vnav', 'btn-vorloc', 'btn-app', 'btn-loc', 'btn-cwsa', 'btn-cwsb', 'btn-thr', 'btn-exped',
+                  'btn-machhold', 'btn-iasacq', 'btn-ins', 'btn-trkhdg', 'btn-backbeam', 'btn-turb', 'btn-pitchhold',
+                  'btn-goaround', 'btn-land', 'btn-mach2', 'btn-maxclimb', 'btn-ias2', 'btn-glide', 'btn-maxcruise',
+                  'btn-altacq', 'btn-at2', 'btn-co', 'btn-sel', 'btn-spdmach', 'btn-hdgtrk', 'btn-metric', 'btn-truemag'];
 
     // ---- interaction (global handlers, per-element bindings are rebuilt with each layout)
     let dragState = null, holdTimer = null;
@@ -699,11 +1118,10 @@
         if (d) d.classList.remove('press');
     });
 
+
     function makeInteractive(id, param, mode) {
         const el = $(id);
         if (!el) return;
-        const base = STEP[param];
-
         el.addEventListener('mousedown', e => {
             if (e.button === 1) { // middle click = toggle the related autopilot mode
                 if (modeOf[param]) toggleGeoFSMode(modeOf[param]);
@@ -715,11 +1133,11 @@
                 const r = el.getBoundingClientRect();
                 const dir = (e.clientX - r.left) > r.width / 2 ? 1 : -1;
                 if (!holdTimer) {
-                    changeValue(param, dir * base);
-                    holdTimer = setInterval(() => changeValue(param, dir * base), 120);
+                    changeValue(param, dir * STEP[param]);
+                    holdTimer = setInterval(() => changeValue(param, dir * STEP[param]), 120);
                 }
             } else {
-                dragState = { param, base, startY: e.clientY, acc: 0 };
+                dragState = { param, base: STEP[param], startY: e.clientY, acc: 0 };
             }
             e.stopPropagation();
             e.preventDefault();
@@ -727,8 +1145,8 @@
 
         el.addEventListener('wheel', e => {
             if (e.altKey) return;
-            if (param === 'hdg' && e.shiftKey) setBank(bankIdx + (e.deltaY < 0 ? 1 : -1));
-            else changeValue(param, e.deltaY < 0 ? base : -base);
+            if (param === 'hdg' && e.shiftKey) setBank(bankIdx + (e.deltaY < 0 ? 1 : -1), true);
+            else changeValue(param, e.deltaY < 0 ? STEP[param] : -STEP[param]);
             e.preventDefault();
             e.stopPropagation();
         }, { passive: false });
@@ -748,6 +1166,7 @@
     };
 
     function getPlaneHeading() {
+
         try {
             if (typeof geofs !== 'undefined') {
                 if (geofs.animation && geofs.animation.values) {
@@ -798,6 +1217,7 @@
                         input.value = values.hdg;
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                         input.dispatchEvent(new Event('change', { bubbles: true }));
+
                     }
                 }
             });
@@ -849,6 +1269,7 @@
                     geofs.autopilot.modes.targetHeading = true;
                 }
 
+
                 lastInteractionTime.hdg = Date.now();
                 pushValuesToGeoFS();
                 syncModeButtons();
@@ -861,10 +1282,29 @@
     // ------------------------------------------------- buttons & indicators
     const setOn = (id, on) => { const e = $(id); if (e) e.classList.toggle('on', !!on); };
 
+    // lever animation: fixed 124 ms flip, always ends exactly up (ARM) or down (OFF), never stuck mid-way
+    let atShown = 180, atAnim = null;
+    function animateLever(lever, target) {
+        if (atAnim) cancelAnimationFrame(atAnim);
+        const from = atShown, t0 = performance.now(), D = 124;
+        const step = now => {
+            const k = Math.min(1, (now - t0) / D);
+            const e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+            atShown = from + (target - from) * e;
+            lever.style.transform = `rotate(${atShown}deg)`;
+            if (k < 1) atAnim = requestAnimationFrame(step);
+            else { atShown = target; lever.style.transform = `rotate(${target}deg)`; atAnim = null; }
+        };
+        atAnim = requestAnimationFrame(step);
+    }
     function setAT(on) {
         atOn = !!on;
         const lever = $('at-lever');
-        if (lever) lever.style.transform = atOn ? 'rotate(0deg)' : 'rotate(180deg)';
+        if (lever) {
+            if (((atAngle % 360) + 360) % 360 !== (atOn ? 0 : 180)) atAngle += 180;
+            if (lever.dataset.init) animateLever(lever, atAngle);
+            else { lever.dataset.init = '1'; atShown = atAngle; lever.style.transform = `rotate(${atAngle}deg)`; }
+        }
         setOn('at-led', atOn);
         setOn('atsw', atOn);
     }
@@ -890,14 +1330,16 @@
         setOn('btn-cmda', ap.on && apChannel === 'A');
         setOn('btn-cmdb', ap.on && apChannel === 'B');
         setOn('btn-cmdc', ap.on && apChannel === 'C');
+        syncRealLamps();
         // only follow GeoFS when its speed state actually changes, so a manual flick isn't undone
-        if (speedOn !== lastSpeedMode) { lastSpeedMode = speedOn; setAT(speedOn); }
+        if (speedOn !== lastSpeedMode) { lastSpeedMode = speedOn; if (Date.now() >= atLockUntil) setAT(speedOn); }
     }
 
     function toggleAP(channel) {
         try {
             if (typeof geofs === 'undefined' || !geofs.autopilot) return;
             apChannel = channel;
+
             if (!geofs.autopilot.on) {
                 if (typeof geofs.autopilot.turnOn === 'function') geofs.autopilot.turnOn();
                 else geofs.autopilot.on = true;
@@ -912,15 +1354,23 @@
         }
     }
 
-    const LOCAL_LAMPS = ['btn-n1', 'btn-lvlchg', 'btn-vnav', 'btn-lnav', 'btn-vorloc', 'btn-app', 'btn-cwsa', 'btn-cwsb',
-                         'btn-thr', 'btn-flch', 'btn-loc', 'btn-exped',
-                         'btn-machhold', 'btn-iasacq', 'btn-ins', 'btn-trkhdg', 'btn-backbeam', 'btn-turb', 'btn-pitchhold',
-                         'btn-goaround', 'btn-land', 'btn-mach2', 'btn-maxclimb', 'btn-ias2', 'btn-glide', 'btn-maxcruise',
-                         'btn-altacq', 'btn-at2', 'btn-nav'];
     const REAL_MODES = { 'btn-speed': 'speed', 'btn-athr': 'speed', 'btn-hdgsel': 'heading', 'btn-hdghold': 'heading',
                          'btn-althld': 'altitude', 'btn-vs': 'verticalSpeed' };
 
     function bindControls() {
+        // outer ring of the heading knob = bank limit selector (click right/left half = next/previous)
+        const hk0 = $('wrap-hdg');
+        if (hk0 && layout.banks) {
+            hk0.addEventListener('mousedown', e => {
+                if (e.button !== 0) return;
+                const r = hk0.getBoundingClientRect();
+                const dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+                if (Math.hypot(dx, dy) / (r.width / 2) < (layout.capR || 0.5)) return;
+                setBank(bankIdx + (dx > 0 ? 1 : -1), true);
+                e.stopImmediatePropagation();
+                e.preventDefault();
+            });
+        }
         [['ias', 'ias'], ['hdg', 'hdg'], ['alt', 'alt'], ['vs', 'vs']].forEach(([k, p]) => {
             makeInteractive('wrap-' + k, p, k === 'vs' && $('vs-wheel') ? 'drag' : 'hold');
             makeInteractive('disp-' + k, p, 'drag');
@@ -933,7 +1383,10 @@
         makeInteractive('disp-crsR', 'crs', 'drag');
 
         const hk = $('wrap-hdg');
-        if (hk) hk.addEventListener('contextmenu', e => { setBank(bankIdx >= 4 ? 0 : bankIdx + 1); e.preventDefault(); });
+        if (hk) hk.addEventListener('contextmenu', e => {
+            if (layout.banks) setBank(bankIdx >= layout.banks.length - 1 ? 0 : bankIdx + 1, true);
+            e.preventDefault();
+        });
 
         Object.keys(REAL_MODES).forEach(id => {
             const e = $(id);
@@ -949,21 +1402,45 @@
                 e.stopPropagation();
                 e.preventDefault();
             });
-            window.addEventListener('mouseup', e => {
+            // capture phase on document so nothing else can swallow the release
+            document.addEventListener('mouseup', e => {
                 if (y0 === null) return;
                 const dy = e.clientY - y0;
                 y0 = null;
                 const want = Math.abs(dy) > 6 ? dy < 0 : !atOn;
                 if (want === atOn) return;
                 setAT(want);
+                atLockUntil = Date.now() + 1500;          // don't let the GeoFS poll flip it back mid-click
                 const geoSpeed = !!(typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.modes && geofs.autopilot.modes.speed);
                 if (geoSpeed !== want) toggleGeoFSMode('speed');
-            });
+                lastSpeedMode = !!(typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.modes && geofs.autopilot.modes.speed);
+            }, true);
         }
 
-        LOCAL_LAMPS.forEach(id => {
+        FLCH_IDS.forEach(id => { const e = $(id); if (e) e.addEventListener('click', toggleFLCH); });
+        LNAV_IDS.forEach(id => { const e = $(id); if (e) e.addEventListener('click', toggleLNAV); });
+        const si = $('btn-spdintv'); if (si) si.addEventListener('click', () => toggleIntv('spd'));
+        const ai = $('btn-altintv'); if (ai) ai.addEventListener('click', () => toggleIntv('alt'));
+        setOn('btn-spdintv', STEP.ias > 1);
+        setOn('btn-altintv', STEP.alt > 100);
+        const ak = $('wrap-alt');
+        if (ak && $('btn-altintv') === null) ak.addEventListener('contextmenu', e => { toggleIntv('alt'); e.preventDefault(); });
+        const sc = $('tu-scope');
+        if (sc) sc.addEventListener('click', () => sc.classList.toggle('on'));
+        // "СОГЛАС. Кпр": synchronise the heading bug with the aircraft's current heading
+        const sy = $('btn-sync');
+        if (sy) sy.addEventListener('click', () => {
+            const h = getPlaneHeading();
+            if (h !== null) { setVal('hdg', Math.round(h) % 360); pushValuesToGeoFS(); }
+            sy.classList.add('on');
+            setTimeout(() => sy.classList.remove('on'), 350);
+        });
+        syncRealLamps();
+        INOP.forEach(id => {
             const e = $(id);
             if (!e) return;
+            if (OPT.hideInop) { e.style.display = 'none'; return; }
+            // cosmetic (RP) buttons: lamp toggles like the real panel, no GeoFS action
             e.classList.toggle('on', !!localLit[id]);
             e.addEventListener('click', () => { localLit[id] = !localLit[id]; e.classList.toggle('on', localLit[id]); });
         });
@@ -983,7 +1460,9 @@
                         else geofs.autopilot.on = false;
                     }
                 } catch (err) {}
-                LOCAL_LAMPS.forEach(id => { localLit[id] = false; setOn(id, false); });
+                stopFLCH(false);
+                stopLNAV();
+                INOP.forEach(id => { localLit[id] = false; setOn(id, false); });
                 dis.classList.add('alert');
                 setTimeout(() => dis.classList.remove('alert'), 1200);
                 syncModeButtons();
@@ -998,6 +1477,7 @@
 
     // ----------------------------------------------------- layout switching
     function buildLayout(name) {
+
         layout = LAYOUTS[name] || LAYOUTS.b737;
         W = layout.W; H = layout.H;
         stage.style.width = W + 'px';
@@ -1006,6 +1486,8 @@
         updateSize();
         bindControls();
         ['ias', 'hdg', 'vs', 'alt', 'crs'].forEach(p => updateDisplay(p, 0));
+        bankTouched = false;
+        bankIdx = layout.bankDefault || 0;
         setBank(bankIdx);
         setAT(atOn);
         setFD(fdOn);
@@ -1048,6 +1530,7 @@
         const e = $('disp-mach');
         if (!e) return;
         let m = 0;
+
         try {
             if (typeof geofs !== 'undefined' && geofs.animation && geofs.animation.values) m = Number(geofs.animation.values.mach) || 0;
         } catch (err) {}
@@ -1063,6 +1546,9 @@
         const now = Date.now();
         updateAircraftTheme();
         updateMach();
+        navTick();
+        applyBankLimit();
+        updateScope();
 
         try {
             if (typeof geofs !== 'undefined' && geofs.autopilot) {
@@ -1098,6 +1584,7 @@
                                 if (diff < -180) diff += 360;
                             }
                             values[key] = rounded;
+
                             updateDisplay(key, diff);
                         }
                     }
@@ -1110,6 +1597,7 @@
     }
 
     // ------------------------------------------------------------------ init
+    updateTabText();
     applyTheme(THEMES.DEFAULT);
     setInterval(pullFromNativeUI, 200);
     setTimeout(() => {
