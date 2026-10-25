@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MCP PANEL
 // @namespace    http://tampermonkey.net/
-// @version      3.9
-// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft: 737 style, 747/757/767/777/787 style (drum or LED displays), Airbus FCU, Concorde, MD-11, AN-124/225, Tu-144, A350, plus Soviet/military/GA/regional colour themes. Everything drawn in SVG/CSS. Knobs: click & hold left/right half to turn, OR use the mouse wheel.
+// @version      5.1
+// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft. Tu-144 radar (РЛС) mode now shows Immersive Airports ground data (runways, taxiways, aprons, stands) and multiplayer traffic.
 // @match        https://*.geo-fs.com/geofs.php*
 // @grant        none
 // ==/UserScript==
@@ -35,6 +35,7 @@
     #mcp-stage .lab.sm{font-size:15px}
     #mcp-stage .lab.xs{font-size:12px}
     .mcp-static{position:absolute;left:0;top:0;pointer-events:none}
+
     .mcp-static .ln{stroke:var(--txt);stroke-width:2.5;fill:none;stroke-linecap:round}
 
     .disp{position:absolute;box-sizing:border-box;background:linear-gradient(#030303,#101010);border:3px solid #1c1c1c;
@@ -49,13 +50,18 @@
     .dg .off{fill:rgba(255,255,255,.07)}
     .dg .on{fill:var(--disp);filter:drop-shadow(0 0 2.5px var(--disp))}
 
-
     .dr{display:flex;width:100%;height:100%}
     .dr span{flex:1;display:flex;align-items:center;justify-content:center;font:bold 26px Arial,Helvetica,sans-serif;
         color:var(--disp);border-left:1px solid #3a3a3a;border-right:1px solid #1a1a1a;position:relative;
         background:linear-gradient(#0a0a0a,#1b1b1b 50%,#0a0a0a)}
     .dr span::after{content:'';position:absolute;inset:0;
         background:linear-gradient(rgba(0,0,0,.7),rgba(0,0,0,0) 32%,rgba(0,0,0,0) 68%,rgba(0,0,0,.7))}
+    /* white-paper drum (Soviet KURS / declination windows) */
+    .disp.paper{border-color:#0c0c0c;background:#d9d9d0}
+    .disp.paper::after{display:none}
+    .disp.paper .dr span{color:#111;border-left:1px solid #8d8d84;border-right:1px solid #f4f4ec;
+        background:linear-gradient(#bdbdb3,#f6f6ee 50%,#bdbdb3)}
+    .disp.paper .dr span::after{background:linear-gradient(rgba(0,0,0,.45),rgba(0,0,0,0) 30%,rgba(0,0,0,0) 70%,rgba(0,0,0,.45))}
 
     .lcdp{position:absolute;box-sizing:border-box;background:linear-gradient(#050505,#101214);border:2px solid #1b2024;
         border-radius:6px;box-shadow:inset 0 0 10px #000,0 0 0 2px rgba(0,0,0,.4)}
@@ -93,13 +99,13 @@
     .disp.sm .dg{width:11px;height:16px}
     .disp.dsm .dr span{font-size:16px}
     .dr span.dot{flex:.35}
+
     .btn.cc{border-radius:3px}
     .btn.cc .bt{font-size:10px;line-height:1.05;white-space:normal;padding:0 1px}
     .btn.cc.flat.on .bt{color:#ffb340;text-shadow:0 0 6px #ff9a00}
     .btn.sm .bt{font-size:10px}
     .tsw{position:absolute;box-sizing:border-box;border:2px solid #8b8e92;border-radius:3px;overflow:hidden;cursor:pointer;
         background:linear-gradient(90deg,#1b1c1e,#2a2b2e,#1b1c1e)}
-
     .tsw .lv{position:absolute;left:3px;right:3px;height:46%;top:50%;border-radius:2px;transition:top .12s;
         background:linear-gradient(#ececec,#9a9c9e)}
     .tsw.on .lv,.tsw.fd .lv{top:4px}
@@ -150,34 +156,117 @@
         justify-content:center;box-shadow:inset 0 0 4px #000}
     .ma.on{background:radial-gradient(circle at 40% 35%,#3dff3d,#128c12);color:#031a03;box-shadow:0 0 10px 2px rgba(60,255,60,.6)}
 
-
     .disengage{position:absolute;box-sizing:border-box;border:3px solid var(--txt);border-radius:10px 10px 0 0;cursor:pointer}
     .disengage .bar{position:absolute;left:6px;right:6px;top:10px;bottom:-4px;border-radius:4px 4px 0 0;
         background:linear-gradient(#bfc2bf,#8d908d);box-shadow:inset 0 2px 3px rgba(255,255,255,.5),inset 0 -3px 6px rgba(0,0,0,.35)}
     .disengage.press .bar{filter:brightness(.85)}
     .disengage .tt{position:absolute;left:50%;top:-12px;transform:translateX(-50%);padding:0 8px;font-weight:bold;
         font-size:16px;color:var(--txt);background:var(--bg);white-space:nowrap}
-
     .disengage.alert .bar{background:linear-gradient(#ff9a8f,#d9382b)}
     .disengage.plain{border:none;border-radius:0}
     .disengage.plain .tt{top:-24px;background:none;padding:0;font-size:15px}
     .disengage.plain .bar{left:0;right:0;top:0;border-radius:2px 2px 0 0;background:linear-gradient(#f6f0de,#cdc5ae)}
     .disengage.plain.alert .bar{background:linear-gradient(#ff9a8f,#d9382b)}
 
-    /* round lamp buttons (AN-124/225 panel) */
+    /* round lamp buttons (AN-124/225 + Tu-144 panels) */
     .rl{position:absolute;border-radius:50%;box-sizing:border-box;border:3px solid #050505;cursor:pointer;
         background:radial-gradient(circle at 40% 35%,var(--c1),var(--c2));filter:brightness(.5);
         box-shadow:inset 0 0 6px #000,0 0 0 2px rgba(0,0,0,.4)}
     .rl.on{filter:none;box-shadow:inset 0 0 4px rgba(255,255,255,.4),0 0 12px 3px var(--c1)}
     .rl:active{transform:translateY(1px)}
 
+    /* Tu-144 round map indicator */
     .scope{position:absolute;border-radius:50%;cursor:pointer}
     .scope svg{display:block}
-    .scope .face{fill:#8f979c;stroke:#3a3d40;stroke-width:2}
+    .scope .face{fill:url(#glassOff);stroke:#050505;stroke-width:2}
+    .scope .offglare{opacity:.55;transition:opacity .2s;pointer-events:none}
+    .scope.on .offglare{opacity:0}
     .scope .glow{fill:none;pointer-events:none}
-    .scope.on .face{fill:#efe6a4}
+    .scope.on .face{fill:url(#paperGlow)}
+    .scope.radar .face{fill:#07140b}
+    .scope .trk{stroke:#101010}
+    .scope.radar .trk{stroke:#bff5c8}
+    .scope .trkt{fill:#222}
+    .scope.radar .trkt{fill:#bff5c8}
+    .scope .pmap{opacity:0;transition:opacity .2s}
+    .scope.on .pmap{opacity:1}
+    .scope.radar .pmap{opacity:0}
+    .scope .map{opacity:0;transition:opacity .2s}
+    .scope.on .map{opacity:1}
+    /* radar mode */
+    .scope .rdr{opacity:0;transition:opacity .2s;pointer-events:none}
+    .scope.radar .rdr{opacity:1}
+    .scope.radar .map{opacity:0}
+    /* КУРС drum: the last digit sits in its own window */
+    .disp.split .dr span:last-child{margin-left:5px;border-left:2px solid #050505;
+        background:linear-gradient(#cfc7a0,#fbf4cc 50%,#cfc7a0)}
     .scope.on .glow{fill:url(#scopeGlow)}
     #scope-ring{transition:transform .25s linear}
+
+    /* Tu-144 extras: amber annunciators, toggles, rotary selectors */
+    .ann{position:absolute;box-sizing:border-box;border-radius:3px;border:2px solid #0a0a0a;cursor:pointer;
+        display:flex;align-items:center;justify-content:center;text-align:center;font:bold 11px/1.05 Arial,Helvetica,sans-serif;
+        color:#6b3000;background:linear-gradient(#b05a1c,#7c3b10);
+        box-shadow:inset 0 0 6px rgba(0,0,0,.6),0 0 0 2px rgba(0,0,0,.4)}
+    .ann.on{color:#2a1000;background:linear-gradient(#ffc650,#ff8a1a);
+        box-shadow:inset 0 0 6px rgba(255,255,255,.5),0 0 12px 2px rgba(255,150,30,.7),0 0 0 2px rgba(0,0,0,.4)}
+    .tgl{position:absolute;cursor:pointer}
+    .tgl .nut{position:absolute;left:50%;top:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border-radius:50%;z-index:2;
+        background:radial-gradient(circle at 40% 35%,#9a9da0,#2a2b2d);border:2px solid #0a0a0a}
+    .tgl .lv2{position:absolute;left:50%;top:50%;width:10px;height:36px;margin:-36px 0 0 -5px;border-radius:5px;
+        transform-origin:50% 100%;transform:rotate(-12deg);transition:transform .22s cubic-bezier(.4,0,.2,1);
+        background:linear-gradient(90deg,#8c8f93,#f2f2f2,#8c8f93);box-shadow:0 1px 3px #000}
+    .tgl .lv2::after{content:'';position:absolute;left:-2px;right:-2px;top:-3px;height:10px;border-radius:5px;
+        background:radial-gradient(circle at 40% 35%,#fff,#aeb2b6);box-shadow:0 1px 2px #000}
+    .tgl.up .lv2{transform:rotate(168deg)}
+    .tgl.blue .lv2{background:linear-gradient(90deg,#4a74c9,#b0c8ff,#4a74c9)}
+    .tgl.h .lv2{width:54px;height:9px;margin:-4.5px 0 0 0;transform-origin:0 50%;transform:rotate(9deg);
+        background:linear-gradient(180deg,#8c8f93,#f2f2f2,#8c8f93)}
+    .tgl.h .lv2::after{left:auto;right:-3px;top:-2px;bottom:auto;width:11px;height:13px}
+    .tgl.h.up .lv2{transform:rotate(171deg)}
+    .btn.free.on .bt{color:#ffb340}
+    .btn.flat.free.on{box-shadow:inset 0 0 10px rgba(255,40,70,.55),0 0 0 2px rgba(0,0,0,.35)}
+
+    .disp.dec{border-color:#16171a;background:#cbb9a2}
+    .disp.dec::after{display:none}
+    .disp.dec .dr span{color:#2a1a10;border-left:1px solid #8f7e68;border-right:1px solid #f1e6d4;
+        background:linear-gradient(#b3a28a,#f0e4d0 50%,#b3a28a)}
+    .disp.dec .dr span::after{background:linear-gradient(rgba(0,0,0,.4),rgba(0,0,0,0) 30%,rgba(0,0,0,0) 70%,rgba(0,0,0,.4))}
+    .lcap{position:absolute;border-radius:50%;cursor:pointer;box-sizing:border-box;border:3px solid #26282a;
+        background:radial-gradient(circle at 40% 35%,#ff7656,#a3170b 55%,#4a0703);filter:brightness(.7);
+        box-shadow:0 0 0 2px #6b4a2a,inset 0 0 6px #000}
+    .lcap::after{content:'';position:absolute;left:0;right:0;top:0;bottom:0;border-radius:50%;
+        background:repeating-conic-gradient(rgba(0,0,0,.35) 0 7deg,rgba(0,0,0,0) 7deg 15deg)}
+    .lcap.on{filter:none;box-shadow:0 0 0 2px #6b4a2a,0 0 14px 4px rgba(255,70,40,.75)}
+    .tgl:not(.h) .nut{width:30px;height:30px;margin:-15px 0 0 -15px;border:none;
+        clip-path:polygon(25% 4%,75% 4%,100% 50%,75% 96%,25% 96%,0 50%);
+        background:radial-gradient(circle at 40% 35%,#e3c46a,#8a6a24 60%,#4d3a12)}
+    .tgl:not(.h) .lv2{height:30px;margin-top:-30px;width:8px;margin-left:-4px}
+    .sw{position:absolute;border-radius:10px;cursor:ns-resize;overflow:hidden;background:#0a0a0b;border:2px solid #000;
+        box-shadow:0 2px 6px #000,inset 0 0 6px #000;touch-action:none}
+    .sw .rib{position:absolute;left:0;right:0;top:0;bottom:0;display:block;
+        background:repeating-linear-gradient(to bottom,#585b60 0 3px,#17181a 3px 7px);transition:background-position .12s}
+    .sw::after{content:'';position:absolute;left:0;right:0;top:0;bottom:0;pointer-events:none;
+        background:linear-gradient(to bottom,rgba(0,0,0,.9),rgba(0,0,0,0) 36%,rgba(0,0,0,0) 64%,rgba(0,0,0,.9)),
+                   linear-gradient(to right,rgba(0,0,0,.5),rgba(255,255,255,.10) 50%,rgba(0,0,0,.5))}
+    .sw .emb{position:absolute;left:50%;top:50%;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;z-index:2;display:block;
+        background:radial-gradient(circle at 40% 35%,#1d1e20,#050505);border:3px solid #eee;box-sizing:border-box;
+        color:#eee;font:bold 14px/19px Arial;text-align:center;font-style:normal}
+    .ipo{position:absolute;cursor:pointer}
+    .ipo svg{width:100%;height:100%;display:block;overflow:visible}
+    .ipo:active{filter:brightness(.85)}
+    .rk{position:absolute;border-radius:50%;cursor:pointer;touch-action:none;
+        background:radial-gradient(circle at 40% 35%,#52555a,#0b0b0c 72%);border:2px solid #000;box-shadow:0 2px 5px #000,inset 0 0 4px rgba(255,255,255,.12)}
+    .rk:hover{filter:brightness(1.3)}
+    .rk svg{width:100%;height:100%;display:block;overflow:visible;pointer-events:none}
+    .rlsunit .scr{fill:#a9b5b9}
+    .rlsunit.on .scr{fill:#06130a}
+    .rlsunit .fx{opacity:0;transition:opacity .25s}
+    .rlsunit.on .fx{opacity:1}
+    .rlsunit .rb{position:absolute;box-sizing:border-box;border:2px solid #050505;border-radius:3px;cursor:pointer;
+        background:linear-gradient(#232425,#0d0d0e);color:#e6e6e0;font:bold 20px Arial;display:flex;align-items:center;
+        justify-content:center;box-shadow:inset 0 1px 1px rgba(255,255,255,.2)}
+    .rlsunit .rb.act{color:#7dff8f;text-shadow:0 0 8px #2dff45}
     .rbtn.on{border-color:#5dff6a;box-shadow:inset 0 0 6px #000,0 0 7px #5dff6a}
     .inop{opacity:.42;filter:saturate(.3) brightness(.8);cursor:not-allowed}
     .inop:active{transform:none}
@@ -226,7 +315,6 @@
         `<div class="vsw" id="wrap-vs" style="${ctr(cx, cy, w, h)}"><div class="wh" id="vs-wheel" style="width:${w - 16}px;height:${h - 18}px"></div></div>`;
 
     const arc = (cx, cy, r, a0, a1) => {
-
         const p = a => [cx + r * Math.sin(a * Math.PI / 180), cy - r * Math.cos(a * Math.PI / 180)];
         const [x0, y0] = p(a0), [x1, y1] = p(a1);
         return `<path class="ln" d="M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 0 ${a1 > a0 ? 1 : 0} ${x1.toFixed(1)},${y1.toFixed(1)}"/>`;
@@ -252,12 +340,12 @@
     }
     const svgSpeed = `<svg viewBox="0 0 100 100"><defs>
         <radialGradient id="gSp" cx="38%" cy="32%" r="75%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
-
         <circle cx="50" cy="50" r="47" fill="#1b1b1d" stroke="#dcdcdc" stroke-width="3"/>
         <g id="dial-ias" class="rot">${lobes}<circle cx="50" cy="50" r="27" fill="url(#gSp)" stroke="#3a3a3c" stroke-width=".9"/></g>
         <circle cx="42" cy="40" r="14" fill="#fff" opacity=".10"/></svg>`;
 
     const crsKnurl = (() => { let s = ''; for (let a = 0; a < 360; a += 12) s += `<line x1="50" y1="3" x2="50" y2="9" transform="rotate(${a} 50 50)"/>`; return s; })();
+
     const svgCourse = id => `<svg viewBox="0 0 100 100"><defs>
         <radialGradient id="gCr${id}" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#dcdcdc"/><stop offset="1" stop-color="#6c6e70"/></radialGradient></defs>
         <g id="dial-${id}" class="rot"><circle cx="50" cy="50" r="47" fill="#8e9092" stroke="#4b4d4f" stroke-width="2"/>
@@ -278,7 +366,6 @@
 
     const altKnurl = (() => { let s = ''; for (let a = 0; a < 360; a += 10) s += `<line x1="50" y1="4" x2="50" y2="10" transform="rotate(${a} 50 50)"/>`; return s; })();
     const svgAlt = `<svg viewBox="0 0 100 100"><defs>
-
         <radialGradient id="gAl" cx="38%" cy="30%" r="80%"><stop offset="0" style="stop-color:var(--k1)"/><stop offset="1" style="stop-color:var(--k2)"/></radialGradient></defs>
         <g id="dial-alt" class="rot"><circle cx="50" cy="50" r="47" fill="url(#gAl)" stroke="#2a2b2d" stroke-width="2"/>
         <g stroke="#2a2b2d" stroke-width="1.4" opacity=".8">${altKnurl}</g>
@@ -303,7 +390,6 @@
         <g id="at-lever"><rect x="39.5" y="2" width="11" height="44" rx="5.5" fill="url(#gLv)" stroke="#2a0606" stroke-width="1"/>
         <rect x="39.5" y="2" width="11" height="10" rx="5" fill="#f1f1f1"/></g>
         <circle cx="45" cy="45" r="9" fill="#9a9c9e" stroke="#222" stroke-width="1.5"/></svg>`;
-
 
     // ===================================================== LAYOUT: 737 style
     function build737() {
@@ -330,7 +416,6 @@
             lab('A/P ENGAGE', 1328, 17, 'sm'), lab('A', 1262, 26, 'sm'), lab('B', 1394, 26, 'sm'),
             lab('F/D', 172, 150, 'sm'), lab('ON', 172, 166, 'sm'), lab('OFF', 172, 234, 'sm'),
             lab('F/D', 1437, 150, 'sm'), lab('ON', 1437, 166, 'sm'), lab('OFF', 1437, 234, 'sm')
-
         ].join('');
         return `${st}${labels}
         ${disp('disp-crsL', 130, 50, 106, 44)}
@@ -354,7 +439,6 @@
         ${btn('btn-althld', 'ALT HLD', 888, 203, 70, 66)}${btn('btn-vs', 'V/S', 1004, 203, 66, 66)}
         ${disp('disp-vs', 1122, 49, 168, 44)}
         ${vsw(1130, 168, 60, 110)}
-
         ${btn('btn-cmda', 'CMD', 1281, 65, 62, 60)}${btn('btn-cmdb', 'CMD', 1366, 65, 62, 60)}
         ${btn('btn-cwsa', 'CWS', 1281, 141, 62, 60)}${btn('btn-cwsb', 'CWS', 1366, 141, 62, 60)}
         <div class="disengage" id="btn-disengage" style="left:1208px;top:196px;width:214px;height:70px"><span class="tt">DISENGAGE</span><div class="bar"></div></div>
@@ -382,7 +466,6 @@
             lab('DN', 645, 114, 'sm'), lab('UP', 645, 214, 'sm'), lab('+', 850, 128, 'sm'),
             lab('A/P ENGAGE', 1255, 13, 'sm'), lab('L', 1176, 32, 'xs'), lab('C', 1258, 32, 'xs'), lab('R', 1340, 32, 'xs'),
             lab('F/D<br>ON', 42, 22, 'sm'), lab('OFF', 42, 143, 'sm'), lab('F/D<br>ON', 1420, 22, 'sm'), lab('OFF', 1425, 143, 'sm')
-
         ].join('');
         return `${st}${labels}
         <div class="rsw" id="fd-L" style="${ctr(42, 102, 40, 40)}"><i class="lv"></i></div>
@@ -405,7 +488,6 @@
         ${btn('btn-cmda', 'CMD', 1173, 68, 56, 52, 'flat')}${btn('btn-cmdb', 'CMD', 1255, 68, 56, 52, 'flat')}${btn('btn-cmdc', 'CMD', 1338, 68, 56, 52, 'flat')}
         <div class="disengage plain" id="btn-disengage" style="left:1170px;top:222px;width:188px;height:50px"><span class="tt">DISENGAGE</span><div class="bar"></div></div>
         <div class="rsw" id="fd-R" style="${ctr(1423, 105, 40, 40)}"><i class="lv"></i></div>`;
-
     }
 
     // ================================================== LAYOUT: Airbus FCU
@@ -434,7 +516,6 @@
         ${rbtn('btn-spdmach', 72, 100, 34)}
         ${knob('wrap-ias', 120, 150, 80, svgRound('ias', false, false))}
         ${knob('wrap-hdg', 250, 150, 80, svgRound('hdg', false, true))}
-
         ${rbtn('btn-hdgtrk', 370, 100, 34)}
         ${btn('btn-cmda', 'AP1', 352, 150, 44, 40, 'ab')}${btn('btn-cmdb', 'AP2', 404, 150, 44, 40, 'ab')}
         ${btn('btn-athr', 'A/THR', 378, 198, 52, 40, 'ab')}
@@ -486,7 +567,6 @@
         ${knob('wrap-hdg', 268, 178, 36, svgRound('hdg', false, false))}${knob('wrap-crsL', 352, 178, 36, svgRound('crsL', false, false))}
         ${sw('btn-cmda', 410, 152)}${sw('btn-cmdb', 458, 152)}
         ${disp('disp-hdg2', 535, 128, 72, 26, 'dsm')}${disp('disp-crsR', 612, 128, 72, 26, 'dsm')}
-
         ${knob('wrap-hdg2', 512, 178, 36, svgRound('hdg2', false, false))}${knob('wrap-crsR', 598, 178, 36, svgRound('crsR', false, false))}
         ${knob('wrap-alt', 730, 160, 76, svgSlot('alt', true))}`;
     }
@@ -507,7 +587,6 @@
         ].join('');
         return `${st}${labels}
         ${sel(70, 15)}${sel(174, 15)}${sel(384, 15)}${sel(506, 15)}
-
         ${disp('disp-ias', 76, 56, 86, 22, 'blue sm')}
         ${disp('disp-hdg', 172, 52, 74, 22, 'blue sm')}
         ${disp('disp-alt', 394, 56, 92, 22, 'blue sm')}
@@ -558,28 +637,24 @@
             lab('HIGH', 1042, 78, 'sm'), lab('MAX', 1038, 170, 'sm'), lab('VEL', 1040, 260, 'sm'),
             `<div class="lab xs" style="left:1155px;top:62px;color:#0c1a20">VOR1 &nbsp;VOR2 &nbsp;APK1 &nbsp;APK2</div>`,
             `<div class="lab xs" style="left:1180px;top:170px;color:#0c1a20">M &nbsp;&nbsp;S</div>`,
-
             `<div class="lab xs" style="left:1245px;top:228px;color:#0c1a20">HDG</div>`
         ].join('');
 
         return `${st}${labels}
         ${disp('disp-ias', 135, 95, 100, 42)}
         ${knob('wrap-ias', 125, 200, 80, svgSpeed)}
-
         ${vsw(322, 150, 66, 180)}
         ${disp('disp-alt', 468, 98, 140, 46)}
         ${knob('wrap-alt', 462, 195, 80, svgAlt)}
         ${btn('btn-at2', 'Нз', 322, 303, 52, 52, 'flat cc')}
         <div class="fdsw" id="fd-L" style="${ctr(392, 306, 26, 44)}"><i class="lv" style="height:16px"></i></div>
         ${btn('btn-ias2', 'Vy', 459, 305, 52, 52, 'flat cc')}
-
         ${rl('btn-cmda', 660, 103, 50, G)}
         ${rl('btn-athr', 653, 195, 44, G)}
         ${rl('btn-cmdb', 647, 272, 44, G)}
         ${knob('wrap-crsL', 842, 213, 100, svgRound('crsL', true, false))}
         ${rl('btn-hdghold', 753, 318, 40, G)}${rl('btn-althld', 842, 325, 44, BL)}${rl('btn-vs', 931, 327, 40, G)}
         ${rl('btn-lvlchg', 1040, 115, 50, B)}${rl('btn-n1', 1036, 207, 50, BR)}${rl('btn-speed', 1030, 297, 50, WH)}
-
         ${disp('disp-alt2', 1245, 112, 230, 62, 'led')}
         ${disp('disp-hdg', 1245, 195, 110, 40, 'led')}
         ${knob('wrap-hdg', 1160, 280, 72, svgRound('hdg', true, false))}
@@ -587,27 +662,240 @@
         ${sq('btn-nav', 'NAV', 1245, 322)}${sq('btn-flch', 'FLCH', 1325, 322)}`;
     }
 
-    // lit round scope of the Tu-144 (cream map screen); compass ring turns with heading
+    // Tu-144 round map indicator (photo: grey-teal glass, bezel ring marked in 10-degree steps,
+    // fixed track line with tick marks). The compass ring turns with the aircraft heading.
     function scopeHTML(cx, cy, d) {
         let t = '';
         for (let a = 0; a < 360; a += 5) {
-            const long = a % 30 === 0, r0 = long ? 124 : 132, r1 = 142;
+            const long = a % 10 === 0, r0 = long ? 124 : 132, r1 = 142;
             const sn = Math.sin(a * Math.PI / 180), cs = Math.cos(a * Math.PI / 180);
-            t += `<path d="M${(r0 * sn).toFixed(1)},${(-r0 * cs).toFixed(1)} L${(r1 * sn).toFixed(1)},${(-r1 * cs).toFixed(1)}" stroke="#2a2a22" stroke-width="${long ? 2.4 : 1.2}"/>`;
-            if (long) t += `<text x="${(108 * sn).toFixed(1)}" y="${(-108 * cs + 5).toFixed(1)}" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="14" fill="#2a2a22" transform="rotate(${a} ${(108 * sn).toFixed(1)} ${(-108 * cs).toFixed(1)})">${a / 10}</text>`;
+            t += `<path d="M${(r0 * sn).toFixed(1)},${(-r0 * cs).toFixed(1)} L${(r1 * sn).toFixed(1)},${(-r1 * cs).toFixed(1)}" stroke="#dfe9e9" stroke-width="${long ? 2 : 1.1}"/>`;
+            if (long) t += `<text x="${(111 * sn).toFixed(1)}" y="${(-111 * cs + 4).toFixed(1)}" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="11" fill="#dfe9e9" transform="rotate(${a} ${(111 * sn).toFixed(1)} ${(-111 * cs).toFixed(1)})">${a / 10}</text>`;
         }
         return `<div class="scope on" id="tu-scope" style="${ctr(cx, cy, d, d)}"><svg viewBox="-160 -160 320 320" width="${d}" height="${d}">
-            <defs><radialGradient id="scopeGlow"><stop offset="0" stop-color="rgba(255,255,220,.35)"/><stop offset=".7" stop-color="rgba(255,255,200,0)"/><stop offset="1" stop-color="rgba(120,90,0,.25)"/></radialGradient></defs>
+            <defs><clipPath id="scopeClip"><circle r="120"/></clipPath><radialGradient id="glassOff" cx="45%" cy="40%" r="75%"><stop offset="0" stop-color="#a9aeb1"/><stop offset=".6" stop-color="#7b8083"/><stop offset="1" stop-color="#3f4446"/></radialGradient><radialGradient id="paperGlow"><stop offset="0" stop-color="#fff7b8"/><stop offset=".75" stop-color="#f1dd7e"/><stop offset="1" stop-color="#cdb04a"/></radialGradient><radialGradient id="scopeGlow"><stop offset="0" stop-color="rgba(255,255,255,.10)"/><stop offset=".7" stop-color="rgba(255,255,255,0)"/><stop offset="1" stop-color="rgba(0,40,50,.3)"/></radialGradient></defs>
             <circle r="158" fill="#0c0d0e"/>
-            <circle class="face" r="146"/>
-            <circle r="146" fill="none" stroke="rgba(0,0,0,.25)" stroke-width="3"/>
-            <circle r="48" fill="none" stroke="rgba(60,50,10,.28)" stroke-dasharray="4 5"/>
-            <circle r="96" fill="none" stroke="rgba(60,50,10,.28)" stroke-dasharray="4 5"/>
-            <g id="scope-ring">${t}</g>
-            <path d="M0,-146 V0" stroke="#1d1f21" stroke-width="3"/>
-            <path d="M0,-18 L9,10 L0,5 L-9,10Z" fill="#1d1f21"/>
-            <circle class="glow" r="146"/></svg></div>
-        `;
+            <circle r="146" fill="#0e1011" stroke="#3a3d3f" stroke-width="2"/>
+            <circle r="123" fill="none" stroke="#b9a25a" stroke-width="3"/>
+            <circle class="face" r="121"/>
+            <g class="offglare" clip-path="url(#scopeClip)"><path d="M-110,-30 L-40,-110 L-10,-100 L-90,10Z" fill="#fff" opacity=".35"/><path d="M20,60 L100,10 L110,40 L40,90Z" fill="#fff" opacity=".2"/><path d="M60,-90 L112,-40 L100,-30 L50,-80Z" fill="#ff7a4a" opacity=".35"/></g>
+                        <g class="pmap" fill="none" stroke="#7a6320" stroke-width=".8" stroke-dasharray="3 4" opacity=".4"><circle r="48"/><circle r="96"/></g>
+            <g id="scope-ring"><g clip-path="url(#scopeClip)"><g class="pmap" id="scope-map" fill="rgba(120,90,20,.05)" stroke="#6b5420" stroke-opacity=".5" stroke-width="1" stroke-linejoin="round">
+                <path d="M-92,-42 L-76,-66 L-48,-78 L-30,-70 L-12,-58 L-24,-38 L-44,-30 L-62,-14 L-82,6 L-98,-12Z"/>
+                <path d="M18,-72 L52,-84 L84,-70 L104,-46 L94,-18 L110,12 L92,34 L64,38 L42,12 L30,-26Z"/>
+                <path d="M-44,22 L-14,36 L-22,66 L-16,92 L-44,104 L-66,76 L-58,44Z"/>
+                <path d="M62,62 L98,66 L104,88 L78,100 L58,90Z"/>
+                <path d="M-18,-96 L8,-104 L22,-92 L0,-86Z"/>
+                <path d="M-70,-20 Q-40,-10 -20,-26 M52,-50 Q70,-34 88,-40 M-30,56 Q-10,60 0,72" fill="none"/>
+                <g fill="#6b5420" stroke="none" opacity=".55" font-family="Arial" font-size="8"><text x="-34" y="-86">ЭЛЕКТРОСТАЛЬ</text><text x="-60" y="-20">МУРОМ</text><text x="-6" y="14">ВЛАДИМИР</text><text x="14" y="40">ПАМЕНСКОЕ</text><text x="-84" y="50">РЯЗАНЬ</text></g>
+            </g></g>${t}</g>
+            <g class="rdr" clip-path="url(#scopeClip)">
+                <g fill="none" stroke="#3be86a" stroke-width="1" opacity=".55"><circle r="30"/><circle r="60"/><circle r="90"/><circle r="120"/>
+                    <path d="M-120,0 H120 M0,-120 V120" opacity=".5"/></g>
+                <g id="radar-ap"></g>
+                <g><animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="4s" repeatCount="indefinite"/>
+                    <path d="M0,0 L0,-120 A120,120 0 0 0 -50.7,-108.8 Z" fill="rgba(93,255,122,.24)"/>
+                    <line x1="0" y1="0" x2="0" y2="-120" stroke="#9dffae" stroke-width="1.8"/></g>
+                <g id="radar-blips"></g>
+                <path d="M0,-6 L4.5,5 L0,2.5 L-4.5,5Z" fill="#cfffd8" stroke="#08210f" stroke-width=".8"/>
+            </g>
+            <text class="rdr" id="radar-range" x="-120" y="124" font-size="11" font-weight="bold" font-family="Arial" fill="#9dffae">125 км</text>
+            <g class="trk" stroke-width="2.4" fill="none"><path d="M0,-121 V121"/></g>
+            <g class="trk" stroke-width="1.2" fill="none"><path d="M-5,-96 H5 M-5,-72 H5 M-5,-48 H5 M-5,-24 H5 M-5,24 H5 M-5,48 H5 M-5,72 H5 M-5,96 H5"/></g>
+            <g class="trkt" font-family="Arial" font-size="8" font-weight="bold"><text x="7" y="-94">5</text><text x="7" y="-70">4</text><text x="7" y="-46">3</text><text x="7" y="-22">2</text><text x="7" y="28">2</text><text x="7" y="52">4</text><text x="7" y="76">6</text><text x="7" y="100">9</text></g>
+            <circle r="3" fill="none" class="trk" stroke-width="1.4"/>
+            <path d="M92,70 l-10,-1 l5,-9 z" fill="#fff" stroke="#111" stroke-width="1"/>
+            <circle class="glow" r="146"/></svg></div>`;
+    }
+
+    // ---- Tu-144 radar mode: shows other GeoFS multiplayer aircraft around you (track-up),
+    // plus airport ground data (runways, taxiways, aprons, stands) from Immersive Airports
+    // when that script is installed and has an airport loaded.
+    // Blip label = altitude difference in hundreds of feet; red = within 1000 ft of you.
+    // In radar mode the ВВОД button cycles the range.
+    const RADAR_RANGES = [30, 50, 125, 250, 375];   // km (matches the range knob scale)
+    let radarOn = false, radarRangeIdx = 2;
+    let podsvet = 10, mapX = 0, mapY = 0, podDrag = null;
+    function applyPodsvet() {
+        const w = $('tu-podsvet');
+        stage.style.filter = w ? `brightness(${(0.55 + 0.045 * podsvet).toFixed(2)})` : '';
+        const rib = w && w.querySelector('.rib');
+        if (rib) rib.style.backgroundPositionY = (podsvet * 11) + 'px';
+    }
+    function applyMapPan() {
+        const m = $('scope-map');
+        if (m) m.setAttribute('transform', `translate(${mapX.toFixed(1)},${mapY.toFixed(1)})`);
+    }
+    function ipoMove(dx, dy) {          // screen direction (-1/0/1); the map slides the opposite way
+        const th = (typeof scopeAng === 'number' ? scopeAng : 0) * Math.PI / 180, st = 6;
+        const sx = -dx * st, sy = -dy * st;
+        mapX = Math.max(-110, Math.min(110, mapX + Math.cos(th) * sx + Math.sin(th) * sy));
+        mapY = Math.max(-110, Math.min(110, mapY - Math.sin(th) * sx + Math.cos(th) * sy));
+        applyMapPan();
+    }
+    window.addEventListener('mousemove', e => {
+        if (!podDrag) return;
+        podDrag.acc += podDrag.y - e.clientY; podDrag.y = e.clientY;
+        while (Math.abs(podDrag.acc) >= 7) {
+            const d = podDrag.acc > 0 ? 1 : -1;
+            podsvet = Math.max(0, Math.min(10, podsvet + d)); podDrag.acc -= d * 7; applyPodsvet();
+        }
+    });
+    window.addEventListener('mouseup', () => { podDrag = null; });
+    const rlsState = { mode: 1, bright: 3, contr: 3, marks: 1 };   // mode: 0 ГОТОВ, 1 ЗЕМЛЯ, 2 МЕТЕО, 3 КОНТУР
+    function rotateRk(id, i) {
+        const el = $(id); if (!el) return;
+        const angs = (el.dataset.angs || '0').split(',').map(Number);
+        const g = el.querySelector('.rot');
+        if (g) g.style.transform = `rotate(${angs[i]}deg)`;
+    }
+    function applyRls() {
+        const scr = $('rls-screen');
+        if (scr) scr.style.filter = `brightness(${[0.45, 0.7, 1, 1.25, 1.5][rlsState.bright]}) contrast(${[0.6, 0.8, 1, 1.25, 1.5][rlsState.contr]})`;
+        const rg = $('rls-rings');
+        if (rg) rg.style.opacity = [0, 0.5, 1][rlsState.marks];
+        updateRadar();
+    }
+    function updateRadarRange() {
+        const t = $('radar-range');
+        if (t) t.textContent = RADAR_RANGES[radarRangeIdx] + ' км';
+    }
+    function setRadar(on) {
+        radarOn = !!on;
+        const sc = $('tu-scope');
+        if (sc) sc.classList.toggle('radar', radarOn);
+        setOn('tu-rdr', radarOn);
+        const ru = $('tu-rlsunit'); if (ru) ru.classList.toggle('on', radarOn);
+        const rbOn = $('rls-on'); if (rbOn) rbOn.classList.toggle('act', radarOn);
+        const k = $('tu-kadr');
+        if (k) k.style.opacity = radarOn ? '.35' : '1';
+        updateRadarRange();
+        if (radarOn) updateRadar();
+    }
+    function cycleRadarRange() {
+        radarRangeIdx = (radarRangeIdx + 1) % RADAR_RANGES.length;
+        rotateRk('rk-range', 4 - radarRangeIdx);
+        updateRadarRange();
+        updateRadar();
+    }
+    function radarTraffic() {
+        const out = [];
+        try {
+            const mp = window.multiplayer || (window.geofs && geofs.multiplayer);
+            const src = mp && (mp.visibleUsers || mp.users);
+            if (!src) return out;
+            const list = Array.isArray(src) ? src : Object.values(src);
+            const myId = window.geofs && geofs.userRecord ? geofs.userRecord.id : undefined;
+            for (const u of list) {
+                if (!u || (myId !== undefined && u.id === myId)) continue;
+                let lat, lon, alt, hdg;
+                const co = u.lastUpdate && u.lastUpdate.co;
+                if (Array.isArray(co)) { lat = co[0]; lon = co[1]; alt = co[2]; hdg = co[3]; }
+                else if (u.referencePoint) { lat = u.referencePoint.lat; lon = u.referencePoint.lon; alt = u.referencePoint.alt; }
+                else if (Array.isArray(u.llaLocation)) { lat = u.llaLocation[0]; lon = u.llaLocation[1]; alt = u.llaLocation[2]; }
+                lat = Number(lat); lon = Number(lon);
+                if (!isFinite(lat) || !isFinite(lon)) continue;
+                out.push({ lat: lat, lon: lon, altFt: (Number(alt) || 0) * 3.28084, hdg: isFinite(Number(hdg)) ? Number(hdg) : null,
+                           cs: String(u.callsign || u.name || '').slice(0, 8).replace(/[<>&]/g, '') });
+            }
+        } catch (e) {}
+        return out;
+    }
+
+    // Airport ground layer, read from Immersive Airports (window.IA_DATA.state)
+    function radarAirport(me, hdg, rangeM, R) {
+        const IA = window.IA_DATA, st = IA && IA.state;
+        if (!st) return '';
+        const k = R / rangeM, h = hdg * Math.PI / 180, cH = Math.cos(h), sH = Math.sin(h);
+        const lonScale = 111320 * Math.max(.15, Math.cos(me.lat * Math.PI / 180));
+        const proj = p => {
+            const e = (p.lon - me.lon) * lonScale, n = (p.lat - me.lat) * 111320;
+            return [(e * cH - n * sH) * k, -(e * sH + n * cH) * k];
+        };
+        const lim = R * 1.6;
+        let budget = 2500;
+        const path = (map, close) => {
+            let d = '';
+            if (!map) return d;
+            for (const f of map.values()) {
+                const pts = f.points;
+                if (!pts || pts.length < 2 || budget <= 0) continue;
+                const xy = pts.map(proj);
+                if (!xy.some(q => Math.abs(q[0]) < lim && Math.abs(q[1]) < lim)) continue;
+                budget -= xy.length;
+                d += 'M' + xy.map(q => q[0].toFixed(1) + ',' + q[1].toFixed(1)).join('L') + (close ? 'Z' : '');
+            }
+            return d;
+        };
+        let out = '';
+        const ap = path(st.aprons, true);
+        if (ap) out += `<path d="${ap}" fill="rgba(140,150,150,.22)" stroke="none"/>`;
+        const tl = path(st.taxilanes);
+        if (tl) out += `<path d="${tl}" fill="none" stroke="#8c7c30" stroke-width=".7" stroke-linejoin="round"/>`;
+        const tw = path(st.taxiways);
+        if (tw) out += `<path d="${tw}" fill="none" stroke="#f1c918" stroke-width="1.1" stroke-linejoin="round"/>`;
+        const rw = path(st.runways);
+        if (rw) out += `<path d="${rw}" fill="none" stroke="#e8e8e0" stroke-width="3.2" stroke-linecap="butt"/>`;
+        if (st.runways) for (const f of st.runways.values()) {
+            const pts = f.points;
+            if (!pts || pts.length < 2 || !f.ref) continue;
+            const q = proj(pts[Math.floor(pts.length / 2)]);
+            if (Math.abs(q[0]) > R || Math.abs(q[1]) > R) continue;
+            out += `<text x="${q[0].toFixed(1)}" y="${(q[1] + 3).toFixed(1)}" text-anchor="middle" font-size="8" font-weight="bold" font-family="Arial" fill="#7dff8f" stroke="#08210f" stroke-width=".4">${String(f.ref).replace(/[<>&]/g, '')}</text>`;
+        }
+        if (st.parking) for (const f of st.parking.values()) {
+            const p = f.point || (f.points && f.points[f.points.length - 1]);
+            if (!p) continue;
+            const q = proj(p);
+            if (Math.abs(q[0]) > R || Math.abs(q[1]) > R) continue;
+            out += `<circle cx="${q[0].toFixed(1)}" cy="${q[1].toFixed(1)}" r="1.3" fill="#ffd21a"/>`;
+        }
+        return out;
+    }
+
+    function updateRadar() {
+        const g = $('radar-blips'), a = $('radar-ap');
+        if (!g) return;
+        const me = ownPos(), hdg = getPlaneHeading();
+        if (!me || hdg === null) { g.innerHTML = ''; if (a) a.innerHTML = ''; const x1 = $('rls-ap'), x2 = $('rls-blips'); if (x1) x1.innerHTML = ''; if (x2) x2.innerHTML = ''; return; }
+        const rangeM = RADAR_RANGES[radarRangeIdx] * 1000, R = 120, myAlt = getAltFt() || 0;
+        const showAp = rlsState.mode === 1 || rlsState.mode === 3, showTr = rlsState.mode === 1 || rlsState.mode === 2;
+        const apSvg = showAp ? radarAirport(me, hdg, rangeM, R) : '';
+        if (a) a.innerHTML = apSvg;
+        const ra = $('rls-ap'); if (ra) ra.innerHTML = apSvg;
+        let svg = '';
+        for (const t of (showTr ? radarTraffic() : []).slice(0, 80)) {
+            const d = distNm(me, t) * 1852;
+            if (d > rangeM) continue;
+            const rel = (bearingDeg(me, t) - hdg) * Math.PI / 180;
+            const r = d / rangeM * R, x = r * Math.sin(rel), y = -r * Math.cos(rel);
+            const dA = Math.round((t.altFt - myAlt) / 100);
+            const col = Math.abs(dA) < 10 ? '#ff5a4a' : '#7dff8f';
+            const lbl = (dA >= 0 ? '+' : '-') + String(Math.abs(dA)).padStart(2, '0');
+            let vec = '';
+            if (t.hdg !== null) {
+                const hh = (t.hdg - hdg) * Math.PI / 180;
+                vec = `<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${(x + 10 * Math.sin(hh)).toFixed(1)}" y2="${(y - 10 * Math.cos(hh)).toFixed(1)}" stroke="${col}" stroke-width="1.3"/>`;
+            }
+            svg += `${vec}<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.2" fill="${col}"/>` +
+                   `<text x="${(x + 6).toFixed(1)}" y="${(y - 3).toFixed(1)}" font-size="8" font-family="Arial" font-weight="bold" fill="${col}">${t.cs}</text>` +
+                   `<text x="${(x + 6).toFixed(1)}" y="${(y + 6).toFixed(1)}" font-size="8" font-family="Arial" fill="${col}">${lbl}</text>`;
+        }
+        g.innerHTML = svg;
+        const rb2 = $('rls-blips'); if (rb2) rb2.innerHTML = svg;
+    }
+
+    const rpmPct = [0, 0, 0, 0];
+    function updateGauges() {
+        if (!$('rpm-1')) return;
+        let thr = 0;
+        try { const v = geofs.animation.values; thr = Number(v.throttle); if (!isFinite(thr)) thr = Number(v.rpm) > 0 ? 0.3 : 0; } catch (e) {}
+        const target = Math.max(0, Math.min(1.05, thr)) * 100;
+        for (let i = 0; i < 4; i++) {
+            rpmPct[i] += (target - rpmPct[i]) * 0.25;
+            const n = $('rpm-' + (i + 1));
+            if (n) n.style.transform = `rotate(${(-135 + rpmPct[i] * 2.45).toFixed(1)}deg)`;
+        }
     }
 
     let scopeAng = 0;
@@ -619,53 +907,209 @@
         const delta = ((-h - scopeAng + 540) % 360 + 360) % 360 - 180;
         scopeAng += delta;
         g.style.transform = `rotate(${scopeAng}deg)`;
+        const az = $('tu-az-t');
+        if (az) az.textContent = String(Math.round(h) % 360).padStart(3, '0');
+        if (radarOn) updateRadar();
     }
 
     // ====================================================== LAYOUT: Tu-144
     function buildTu144() {
         const WH = '#f1f1ea';
-        const labC = (t, x, y, cls = 'xs', c = WH) => `<div class="lab ${cls}" style="left:${x}px;top:${y}px;color:${c}">${t}</div>`;
-        const rl = (id, cx, cy, d, c) => `<div class="rl" id="${id}" style="${ctr(cx, cy, d, d)}--c1:${c[0]};--c2:${c[1]}"></div>`;
+
+        const L = (t, x, y, cls = 'xs', c = WH, ex = '') => `<div class="lab ${cls}" style="left:${x}px;top:${y}px;color:${c};${ex}">${t}</div>`;
+        const rl = (id, cx, cy, d, c, cls = '') => `<div class="rl ${cls}" id="${id}" style="${ctr(cx, cy, d, d)}--c1:${c[0]};--c2:${c[1]}"></div>`;
+        const sec = (l, t, w, h, inner) => `<div style="position:absolute;left:${l}px;top:${t}px;width:${w}px;height:${h}px">${inner}</div>`;
         const AM = ['#ffb347', '#7a4a08'], G = ['#5dff7a', '#0b5a30'], R = ['#ff6a5a', '#6a1008'];
-        const ang = Array.from({ length: 60 }, (_, i) => i * 6);
-        const st = svgWrap(1420, 410, `
-            ${screw(14, 14, 8)}${screw(1406, 14, 8)}${screw(14, 396, 8)}${screw(1406, 396, 8)}
-            <rect x="385" y="50" width="370" height="330" rx="8" fill="#0d0e0f" stroke="#07090a" stroke-width="3"/>
-            <rect x="770" y="50" width="230" height="330" rx="8" fill="#0d0e0f" stroke="#07090a" stroke-width="3"/>
-            <path d="M770,60 V370" stroke="#e8e8e0" stroke-width="2"/>`);
-        const ring = [['Кпр1', -150], ['Кпр2', -122], ['Кпр3', -96], ['Кпр зад', -68], ['MK1', -28], ['MK2', 12],
-                      ['MK3', 46], ['ИК', 80], ['Кпнп1', 112], ['Кпнп2', 146], ['ОТКЛ', 180]]
-            .map(([t, a]) => labC(t, (520 + 84 * Math.sin(a * Math.PI / 180)).toFixed(0), (270 - 84 * Math.cos(a * Math.PI / 180)).toFixed(0))).join('');
-        const labels = [
-            lab('МАРШ / АЭР', 60, 315, 'xs'),
-            labC('КУРС', 450, 135, 'sm'), ring,
-            labC('МАГНИТНОЕ', 885, 85, 'sm'), labC('СКЛОНЕНИЕ', 885, 106, 'sm'),
-            labC('−', 835, 232, 'sm'), labC('+', 935, 232, 'sm'),
-            lab('СКОРОСТЬ', 1090, 62, 'xs'), lab('ВЫСОТА', 1210, 62, 'xs'), lab('ВЕРТ. СК.', 1330, 62, 'xs'),
-            lab('ДЕРЖ', 1090, 325, 'xs'), lab('ДЕРЖ', 1210, 325, 'xs'), lab('ДЕРЖ', 1330, 325, 'xs'),
-            lab('АП', 1170, 372, 'sm'), lab('АТ', 1300, 372, 'sm')
-        ].join('');
-        return `${st}${labels}
-        ${scopeHTML(210, 205, 320)}
-        <div class="fdsw" id="fd-L" style="${ctr(60, 350, 34, 46)}"><i class="lv"></i></div>
+        let uid = 0;
+        // rotary selector knob (black, knurled, with pointer)
+        const svgBat = () => {
+            let rib = '';
+            for (let a = 0; a < 360; a += 15) rib += `<line x1="50" y1="14" x2="50" y2="21" transform="rotate(${a} 50 50)"/>`;
+            return `<svg viewBox="0 0 100 100"><defs><radialGradient id="gBat" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#3a3d41"/><stop offset="1" stop-color="#08090a"/></radialGradient></defs>
+                <g class="rot"><circle cx="50" cy="50" r="38" fill="url(#gBat)" stroke="#4a4d52" stroke-width="2"/>
+                <g stroke="rgba(255,255,255,.16)" stroke-width="1.6">${rib}</g>
+                <path d="M33,58 L42,14 Q50,2 58,14 L67,58 Q50,70 33,58Z" fill="#101112" stroke="#6a6d72" stroke-width="2" stroke-linejoin="round"/>
+                <path d="M46,16 L44,54 M54,16 L56,54" stroke="rgba(255,255,255,.18)" stroke-width="1.5" fill="none"/></g></svg>`;
+        };
+        const svgFlute = id => {
+            let f = '';
+            for (let a = 0; a < 360; a += 15) f += `<circle cx="${(50 + 40 * Math.sin(a * Math.PI / 180)).toFixed(1)}" cy="${(50 - 40 * Math.cos(a * Math.PI / 180)).toFixed(1)}" r="5.5" fill="#17181a" stroke="#2f3135" stroke-width="1"/>`;
+            return `<svg viewBox="0 0 100 100"><defs><radialGradient id="gFl${id}" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#4b4e53"/><stop offset="1" stop-color="#0b0c0d"/></radialGradient></defs>
+                <g id="dial-${id}" class="rot"><circle cx="50" cy="50" r="46" fill="#0a0a0b"/>${f}
+                <circle cx="50" cy="50" r="31" fill="url(#gFl${id})" stroke="#3a3c3f" stroke-width="1.5"/>
+                <path d="M50,26 L50,36" stroke="#d8d8d0" stroke-width="3" stroke-linecap="round"/></g></svg>`;
+        };
+        const svgSel = cap => {
+            if (cap === 'bat') return svgBat();
+            const u = ++uid;
+            let kn = '';
+            for (let a = 0; a < 360; a += 15) kn += `<line x1="50" y1="9" x2="50" y2="14" transform="rotate(${a} 50 50)"/>`;
+            return `<svg viewBox="0 0 100 100"><defs><radialGradient id="gSk${u}" cx="38%" cy="30%" r="80%"><stop offset="0" stop-color="#52565b"/><stop offset="1" stop-color="#0d0e0f"/></radialGradient></defs>
+                <circle cx="50" cy="50" r="48" fill="#0b0b0c" stroke="#2c2e30" stroke-width="2"/>
+                <g class="rot"><circle cx="50" cy="50" r="41" fill="url(#gSk${u})" stroke="#5a5d62" stroke-width="1.5"/>
+                <g stroke="rgba(255,255,255,.12)" stroke-width="1.2">${kn}</g>
+                ${cap === 'arrow'
+                    ? '<path d="M50,5 L68,42 L62,62 H38 L32,42Z" fill="#35373b" stroke="#9a9da2" stroke-width="2.2" stroke-linejoin="round"/>'
+                    : '<rect x="46" y="7" width="8" height="26" rx="3" fill="#e8e8e0"/>'}
+                </g></svg>`;
+        };
+        const selk = (id, cx, cy, d, cap, angs, i, fx = '') =>
+            `<div class="knob selk" id="${id}" data-angs="${angs.join(',')}" data-i="${i}" data-fx="${fx}" style="${ctr(cx, cy, d, d)}">${svgSel(cap)}</div>`;
+        const tgl = (id, cx, cy, w, h, cls = '') =>
+            `<div class="tgl ${cls}" id="${id}" style="${ctr(cx, cy, w, h)}"><i class="nut"></i><i class="lv2"></i></div>`;
+        const ann = (id, t, cx, cy, w, h) => `<div class="ann free" id="${id}" style="${ctr(cx, cy, w, h)}">${t}</div>`;
+        const bolt = (x, y, r = 11) => `<circle cx="${x}" cy="${y}" r="${r}" fill="#0b0b0c" stroke="#26282a" stroke-width="2"/><ellipse cx="${x - 2}" cy="${y - 3}" rx="${(r * .5).toFixed(1)}" ry="${(r * .3).toFixed(1)}" fill="#fff" opacity=".18"/>`;
 
-        ${disp('disp-hdg', 590, 130, 150, 52)}
-        ${knob('wrap-crsL', 520, 270, 100, svgRound('crsL', true, false))}
-        <div class="btn flat cc" id="btn-sync" style="${ctr(655, 315, 100, 60)}background:linear-gradient(#ffe97a,#d9b92f)"><span class="bt" style="color:#1a1a1a;font-size:13px">СОГЛАС.<br>Кпр</span><i class="lamp"></i></div>
-        ${rl('btn-hdghold', 700, 215, 34, G)}
+        // ---------------------------------------------------- TOP ROW: engine RPM gauges + РЛС unit
+        const gauge = (cx, cy, d, n) => {
+            let g = '';
+            for (let p = 0; p <= 110; p += 2) {
+                const a = (-135 + p * 2.45) * Math.PI / 180, major = p % 20 === 0, r0 = major ? 70 : 77, r1 = 86;
+                g += `<line x1="${(100 + r0 * Math.sin(a)).toFixed(1)}" y1="${(100 - r0 * Math.cos(a)).toFixed(1)}" x2="${(100 + r1 * Math.sin(a)).toFixed(1)}" y2="${(100 - r1 * Math.cos(a)).toFixed(1)}" stroke="#eee" stroke-width="${major ? 2.4 : 1}"/>`;
+                if (major && p > 0) g += `<text x="${(100 + 58 * Math.sin(a)).toFixed(1)}" y="${(104 - 58 * Math.cos(a)).toFixed(1)}" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="15" fill="#eee">${p}</text>`;
+            }
+            return `<div style="position:absolute;${ctr(cx, cy, d, d)}"><svg viewBox="0 0 200 200" width="${d}" height="${d}">
+                <circle cx="100" cy="100" r="99" fill="#0b0b0c" stroke="#26282a" stroke-width="2"/>
+                <circle cx="100" cy="100" r="93" fill="#121214" stroke="#555" stroke-width="1"/>${g}
+                <text x="100" y="86" text-anchor="middle" font-family="Arial" font-weight="bold" font-size="13" fill="#eee">100%</text>
+                <text x="100" y="124" text-anchor="middle" font-family="Arial" font-size="9" fill="#cfcfcf">ОБОРОТЫ</text>
+                <text x="100" y="135" text-anchor="middle" font-family="Arial" font-size="9" fill="#cfcfcf">R.P.M. ${n}</text>
+                <g id="rpm-${n}" style="transform-origin:100px 100px;transition:transform .35s;transform:rotate(-135deg)">
+                    <path d="M97,100 L100,22 L103,100Z" fill="#f4f4f0"/></g>
+                <circle cx="100" cy="100" r="9" fill="#202022" stroke="#555" stroke-width="2"/></svg></div>`;
+        };
+        const rlsKnob = (id, cx, cy, d, angs, i) => `<div class="rk" id="${id}" data-angs="${angs.join(',')}" data-i="${i}" title="click = next, right-click / wheel = change" style="${ctr(cx, cy, d, d)}"><svg viewBox="0 0 100 100"><g class="rot"><line x1="50" y1="50" x2="50" y2="10" stroke="#e8e8e0" stroke-width="9" stroke-linecap="round"/></g></svg></div>`;
+        const RLS = `<div class="rlsunit" id="tu-rlsunit" style="position:absolute;left:0;top:0;width:450px;height:330px">
+            <div style="position:absolute;left:0;top:0;width:450px;height:330px;box-sizing:border-box;background:linear-gradient(#222426,#0c0d0e);border:3px solid #050607;border-radius:14px 14px 6px 6px;box-shadow:inset 0 0 14px #000"></div>
+            <svg id="rls-screen" style="position:absolute;left:62px;top:16px" width="266" height="150" viewBox="-150 -125 300 135" preserveAspectRatio="none">
+                <defs><clipPath id="rlsClip"><path d="M-136,-118 Q0,-132 136,-118 L128,6 Q0,14 -128,6Z"/></clipPath></defs>
+                <path d="M-142,-124 Q0,-138 142,-124 L134,12 Q0,22 -134,12Z" fill="#2a2c2e" stroke="#555" stroke-width="3"/>
+                <g clip-path="url(#rlsClip)"><rect x="-150" y="-125" width="300" height="140" class="scr"/>
+                    <g stroke="rgba(255,255,255,.55)" stroke-width=".8" class="rlsrays"></g>
+                    <g class="fx"><g id="rls-rings" fill="none" stroke="#3be86a" stroke-width=".8" opacity=".5"><circle r="40"/><circle r="80"/><circle r="120"/></g>
+                        <g id="rls-ap"></g>
+                        <g><animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="4s" repeatCount="indefinite"/>
+                            <path d="M0,0 L0,-150 A150,150 0 0 0 -63,-136 Z" fill="rgba(93,255,122,.24)"/><line x1="0" y1="0" x2="0" y2="-150" stroke="#9dffae" stroke-width="1.6"/></g>
+                        <g id="rls-blips"></g></g></g>
+                <circle r="6" fill="#111" stroke="#666" stroke-width="2"/></svg>
+            <div class="rb" id="rls-on" style="left:352px;top:30px;width:78px;height:62px;font-size:26px">РЛС</div>
+            <div class="rb" id="rls-off" style="left:352px;top:100px;width:78px;height:50px;font-size:18px">ОТКЛ</div>
+            ${rlsKnob('rk-freq', 32, 190, 44, [-120, -80, -40, 0, 40, 80, 120], 3)}
+            ${rlsKnob('rk-marks', 418, 190, 44, [-60, 0, 60], 1)}
+            ${rlsKnob('rk-mode', 80, 268, 44, [63, 78, 95, 110], rlsState.mode)}
+            ${rlsKnob('rk-bright', 160, 292, 38, [-120, -60, 0, 60, 120], rlsState.bright)}
+            ${rlsKnob('rk-contr', 250, 292, 38, [-120, -60, 0, 60, 120], rlsState.contr)}
+            ${rlsKnob('rk-range', 400, 270, 44, [-67, -80, -95, -108, -120], 4 - radarRangeIdx)}
+            ${rlsKnob('rk-centre', 225, 214, 56, [-135, -90, -45, 0, 45, 90, 135], 3)}
+            ${L('ЧАСТОТА', 40, 236, 'xs', WH)}${L('МЕТКИ', 412, 232, 'xs', WH)}${L('ЯРКОСТЬ', 160, 320, 'xs', WH, 'font-size:10px')}${L('КОНТРАСТ', 252, 320, 'xs', WH, 'font-size:10px')}
+            ${L('ГОТОВ', 128, 244, 'xs', WH, 'font-size:10px')}${L('ЗЕМЛЯ', 128, 258, 'xs', WH, 'font-size:10px')}${L('МЕТЕО', 128, 272, 'xs', WH, 'font-size:10px')}${L('КОНТУР', 128, 286, 'xs', WH, 'font-size:10px')}
+            ${L('375', 352, 250, 'xs', WH, 'font-size:10px')}${L('250', 352, 262, 'xs', WH, 'font-size:10px')}${L('125', 352, 274, 'xs', WH, 'font-size:10px')}${L('50', 352, 286, 'xs', WH, 'font-size:10px')}${L('30', 352, 298, 'xs', WH, 'font-size:10px')}
+        </div>`;
+        const TOP = gauge(110, 150, 190, 1) + gauge(320, 150, 190, 2) + sec(455, 5, 450, 330, RLS) + gauge(1020, 150, 190, 3) + gauge(1230, 150, 190, 4);
 
-        ${disp('disp-crsR', 885, 160, 110, 44)}
-        ${knob('wrap-crsR', 885, 275, 86, svgRound('crsR', true, false))}
+        // ---------------------------------------------------- A: map indicator (400 x 450)
+        const lampA = [-50, -17, 17, 50];
+        const lampNums = lampA.map((a, k) => L(String(k + 1), (340 + 41 * Math.sin(a * Math.PI / 180)).toFixed(0), (52 - 41 * Math.cos(a * Math.PI / 180)).toFixed(0), 'xs')).join('');
+        const A = `${svgWrap(400, 450, `
+            <rect x="1.5" y="1.5" width="397" height="447" rx="12" fill="#0b0c0d" stroke="#050607" stroke-width="3"/>
+            <circle cx="195" cy="192" r="171" fill="#131516" stroke="#2c2f31" stroke-width="3"/>
+            ${screw(14, 436, 7)}${screw(386, 436, 7)}`)}
+        ${scopeHTML(195, 192, 330)}
+        <div class="ann free on" id="tu-pu" style="${ctr(25, 24, 40, 28)}background:linear-gradient(#ff5a6a,#b0102a);color:#fff;font-size:15px">С</div>
+        ${disp('tu-kadr', 34, 66, 62, 24, 'drum dsm')}
+        ${selk('tu-lamp', 340, 54, 56, 'dot', lampA, 2, 'lamp')}
+        <div class="sw" id="tu-podsvet" title="ПОДСВЕТ: scroll the mouse wheel or drag up/down (panel illumination)" style="${ctr(30, 322, 46, 58)}"><i class="rib"></i><i class="emb">Ө</i></div>
+        ${selk('tu-mode', 72, 394, 66, 'dot', [-59, -42, 0, 38, 63], 2)}
+        <div class="btn flat free on" id="tu-b1" style="${ctr(143, 397, 40, 40)}"><span class="bt" style="color:#ff6f86;text-shadow:0 0 8px #ff2a4a;font-size:12px">40</span></div>
+        <div class="btn flat free" id="tu-vvod" style="${ctr(197, 392, 52, 46)}background:linear-gradient(#b4b6b8,#6c6f72)"><span class="bt" style="color:#111;font-size:13px">ВВОД</span></div>
+        <div class="btn flat free on" id="tu-b2" style="${ctr(250, 397, 40, 40)}"><span class="bt" style="color:#ff6f86;text-shadow:0 0 8px #ff2a4a;font-size:12px">РУ</span></div>
+        <div style="position:absolute;${ctr(200, 437, 190, 18)}background:linear-gradient(#d2b566,#9c8238);border:2px solid #3a2f10;border-radius:2px;box-sizing:border-box;color:#2a1f05;font:bold 11px/14px Arial;text-align:center;letter-spacing:.6px;white-space:pre">3,20/40/            РУ,РУ</div>
+        <div style="position:absolute;${ctr(290, 372, 9, 9)}border-radius:50%;background:#e8e8e0;box-shadow:0 0 4px #fff"></div>
+        ${tgl('tu-marker', 290, 402, 40, 50, '')}
+        <div style="position:absolute;${ctr(335, 358, 62, 62)}border-radius:50%;background:radial-gradient(#050505,#161718);border:3px solid #26282a;box-shadow:inset 0 0 8px #000"></div>
+        <div class="ipo" id="tu-ipo" title="РУ КАРТОЙ ИПО: click an arrow (hold to repeat) to slide the map, centre = recentre" style="${ctr(335, 358, 48, 48)}"><svg viewBox="0 0 100 100"><defs><linearGradient id="gHex" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#eef2f5"/><stop offset=".5" stop-color="#97a1aa"/><stop offset="1" stop-color="#d6dce0"/></linearGradient></defs>
+            <polygon points="50,3 91,26 91,74 50,97 9,74 9,26" fill="url(#gHex)" stroke="#4c5156" stroke-width="3"/>
+            <circle cx="50" cy="50" r="31" fill="none" stroke="#6a7279" stroke-width="2"/>
+            <path d="M50,50 V24 M50,50 V76 M50,50 H24 M50,50 H76" stroke="#111" stroke-width="5" stroke-linecap="round" fill="none"/>
+            <path d="M50,12 L59,27 H41Z M50,88 L59,73 H41Z M12,50 L27,41 V59Z M88,50 L73,41 V59Z" fill="#111"/><circle cx="50" cy="50" r="6" fill="#111"/></svg></div>
+        ${rl('tu-red', 338, 405, 22, R, 'free')}
+        <div class="btn flat" id="tu-rdr" title="РЛС: radar mode (ВВОД = range)" style="${ctr(378, 196, 38, 26)}"><span class="bt" style="font-size:11px">РЛС</span></div>
+        ${L('ПУ', 62, 16, 'xs')}${L('С', 62, 34, 'xs')}
+        ${L('КАДР', 34, 90, 'sm')}
+        ${lampNums}
+        ${L('ЛАМПА', 338, 96, 'sm', WH, 'transform:translate(-50%,-50%) rotate(-6deg)')}
+        ${L('ЯРКОСТЬ', 388, 128, 'xs', WH, 'transform:translate(-50%,-50%) rotate(90deg)')}
+        ${L('ПОДСВЕТ', 12, 262, 'xs', WH, 'transform:translate(-50%,-50%) rotate(-90deg)')}
+        ${L('0', 30, 322, 'xs')}
+        ${L('КОНТР', 36, 352, 'xs')}${L('НУ', 28, 369, 'xs')}${L('МС', 72, 346, 'xs')}${L('▲', 72, 361, 'xs')}${L('РУ', 102, 356, 'xs')}${L('СП', 120, 371, 'xs')}${L('КАРТА', 68, 430, 'sm')}
+        ${L('МАРКЕР', 293, 352, 'xs')}
+        ${L('РУ', 335, 307, 'xs')}${L('КАРТОЙ', 335, 320, 'xs')}${L('ИПО', 335, 333, 'xs')}
+        ${L('НВ', 366, 388, 'xs')}${L('→', 322, 437, 'xs')}`;
 
-        ${disp('disp-ias', 1090, 100, 90, 44)}
-        ${disp('disp-alt', 1210, 100, 112, 44)}
-        ${disp('disp-vs', 1330, 100, 100, 44)}
+        // ---------------------------------------------------- B: КУРС / declination panel (450 x 527)
+        const cc = [155, 395];
+        const crsPos = [['ОТКЛ', 113, 426], ['Кпр1', 110, 413], ['Кпр2', 107, 391], ['Кпр3', 110, 367], ['Кпр зад', 121, 355],
+                        ['МК1', 156, 351], ['МК2', 180, 353], ['МК3', 198, 367], ['ИК', 197, 392], ['Кпнп1', 200, 414], ['Кпнп2', 191, 426]];
+        const crsAng = crsPos.map(([, x, y]) => Math.round(Math.atan2(x - cc[0], -(y - cc[1])) * 180 / Math.PI));
+        const crsLabs = crsPos.map(([t, x, y]) => L(t, x, y, 'xs', WH, 'font-size:10px;font-weight:600')).join('');
+        const crsDots = crsPos.map(([, x, y]) => { const a = Math.atan2(x - cc[0], -(y - cc[1])); return `<circle cx="${(cc[0] + 35 * Math.sin(a)).toFixed(1)}" cy="${(cc[1] - 35 * Math.cos(a)).toFixed(1)}" r="1.7" fill="#f1f1ea"/>`; }).join('');
+        const B = `${svgWrap(450, 527, `
+            <rect x="80" y="210" width="295" height="285" rx="6" fill="#0b0c0d" stroke="#050607" stroke-width="3"/>
+            <rect x="83" y="213" width="289" height="279" rx="4" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="1.5"/>
+            <path d="M268,222 V484" stroke="#f1f1ea" stroke-width="2"/>
+            <rect x="158" y="277" width="92" height="58" rx="5" fill="#0d0e0f" stroke="#6b7076" stroke-width="3"/>
+            <rect x="285" y="289" width="74" height="40" rx="4" fill="#0d0e0f" stroke="#6b7076" stroke-width="3"/>
+            <rect x="119" y="438" width="62" height="56" rx="5" fill="#111213" stroke="#5a5e63" stroke-width="2.5"/>
+            ${[[163, 282], [245, 282], [163, 330], [245, 330], [290, 294], [354, 294], [290, 324], [354, 324]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="2.3" fill="#8a8f95"/>`).join('')}
+            ${crsDots}
+            ${bolt(143, 200)}${bolt(233, 200)}${bolt(320, 200)}${bolt(405, 255)}
+            ${screw(92, 222, 6)}${screw(362, 222, 6)}${screw(92, 484, 6)}${screw(362, 484, 6)}
+            <path d="M298,364 Q322,342 346,364" fill="none" stroke="#f1f1ea" stroke-width="2.5" stroke-linecap="round"/>
+            <path d="M296,367 l10,-3 l-4,9z M348,367 l-10,-3 l4,9z" fill="#f1f1ea"/>`)}
+        ${ann('tu-a1', '', 82, 62, 66, 28)}${ann('tu-a1b', 'ОТКАЗ<br>ЦВМ', 178, 62, 116, 28)}
+        ${ann('tu-a2', '', 82, 95, 66, 28)}${ann('tu-a2b', 'НЕТ ВВ<br>РУМБ', 178, 95, 116, 28)}
+        ${ann('tu-a3', '', 82, 128, 66, 28)}${ann('tu-a3b', '', 178, 128, 116, 28)}
+        <div style="position:absolute;${ctr(180, 161, 120, 30)}background:#0a0a0a;border:2px solid #000;border-radius:3px;box-sizing:border-box;box-shadow:0 0 0 2px rgba(0,0,0,.4)"></div>
+        <div style="position:absolute;${ctr(75, 161, 76, 22)}background:#0b0b0b;border-radius:2px"></div>
+        ${tgl('tu-marsh', 75, 184, 110, 44, 'h blue')}
+        <div style="position:absolute;${ctr(372, 80, 86, 86)}border-radius:50%;box-sizing:border-box;background:radial-gradient(#1a1a1a,#050505);border:6px solid #0d0d0d;box-shadow:0 0 0 2px #2a2d2f,inset 0 0 10px #000"></div>
+        <div style="position:absolute;${ctr(372, 80, 60, 3)}background:#e03a2a;box-shadow:0 0 4px #e03a2a"></div>
+        ${disp('disp-hdg', 204, 306, 74, 34, 'paper split')}
+        ${selk('tu-crssel', 155, 395, 66, 'bat', crsAng, 6)}
+        <div class="btn flat" id="btn-sync" style="${ctr(150, 466, 52, 44)}background:linear-gradient(#fff3a0,#ecc92f 55%,#caa21a);border-radius:5px;border-color:#2a2410;box-shadow:inset 0 2px 3px rgba(255,255,255,.6),inset 0 -3px 5px rgba(0,0,0,.25),0 2px 4px #000"><span class="bt" style="color:#1a1a1a;font-size:11px;line-height:1.1;white-space:normal">СОГЛАС.<br>Кпр</span></div>
+        ${disp('disp-crsR', 322, 309, 62, 28, 'dec')}
+        ${knob('wrap-crsR', 322, 400, 62, svgFlute('crsR'))}
+        <div class="lcap free" id="tu-2n" style="${ctr(343, 472, 28, 28)}"></div>
+        ${L('АЗИМУТ', 372, 55, 'xs', WH, 'font-size:9px')}${L('ГРАД', 372, 106, 'xs', WH, 'font-size:9px')}
+        ${L('◄', 342, 80, 'xs', WH, 'font-size:9px')}${L('►', 402, 80, 'xs', WH, 'font-size:9px')}
+        ${L('000', 372, 80, 'sm', '#ffffff', 'font-size:17px;text-shadow:0 0 3px #000,0 0 6px #000;letter-spacing:1px').replace('class="lab sm"', 'id="tu-az-t" class="lab sm"')}
+        ${L('МАРШ.', 56, 161, 'xs', WH, 'font-size:10px')}${L('АЭР.', 96, 161, 'xs', WH, 'font-size:10px')}
+        ${L('КУРС', 124, 313, '', WH, 'font-size:19px')}
+        ${crsLabs}
+        ${L('МАГНИТНОЕ', 322, 245, 'xs', WH, 'font-size:12px')}${L('СКЛОНЕНИЕ', 322, 260, 'xs', WH, 'font-size:12px')}
+        ${L('−', 297, 280, 'sm')}${L('+', 347, 280, 'sm')}
+        ${L('−', 296, 378, 'sm')}${L('+', 349, 378, 'sm')}
+        ${L('2н', 343, 492, 'xs', 'var(--txt)', 'font-size:10px')}`;
 
-        ${knob('wrap-ias', 1090, 200, 84, svgSpeed)}
-        ${knob('wrap-alt', 1210, 200, 84, svgAlt)}
-        ${knob('wrap-vs', 1330, 200, 84, svgRound('vs', true, false))}
-        ${rl('btn-speed', 1090, 290, 44, AM)}${rl('btn-althld', 1210, 290, 44, AM)}${rl('btn-vs', 1330, 290, 44, AM)}
-        ${rl('btn-cmda', 1130, 372, 40, R)}${rl('btn-athr', 1260, 372, 40, G)}`;
+        // ---------------------------------------------------- C: autopilot columns (380 x 450)
+        const C = `${svgWrap(380, 450, `
+            <rect x="1.5" y="1.5" width="377" height="447" rx="10" fill="#0d0e0f" stroke="#07090a" stroke-width="3"/>
+            <path d="M128,14 V310 M253,14 V310" stroke="#e8e8e0" stroke-width="2" opacity=".55"/>
+            ${screw(14, 14, 7)}${screw(366, 14, 7)}${screw(14, 436, 7)}${screw(366, 436, 7)}`)}
+        ${L('СКОРОСТЬ', 64, 30, 'xs')}${L('ВЫСОТА', 190, 30, 'xs')}${L('ВЕРТ. СК.', 316, 30, 'xs')}
+        ${disp('disp-ias', 64, 70, 100, 44)}${disp('disp-alt', 190, 70, 118, 44)}${disp('disp-vs', 316, 70, 110, 44)}
+        ${knob('wrap-ias', 64, 170, 84, svgSpeed)}${knob('wrap-alt', 190, 170, 84, svgAlt)}${knob('wrap-vs', 316, 170, 84, svgRound('vs', true, false))}
+        ${rl('btn-speed', 64, 262, 44, AM)}${rl('btn-althld', 190, 262, 44, AM)}${rl('btn-vs', 316, 262, 44, AM)}
+        ${L('ДЕРЖ', 64, 296, 'xs')}${L('ДЕРЖ', 190, 296, 'xs')}${L('ДЕРЖ', 316, 296, 'xs')}
+        ${rl('btn-cmda', 56, 350, 40, R)}${rl('btn-athr', 324, 350, 40, G)}
+        ${L('АП', 56, 386, 'sm')}${L('АТ', 324, 386, 'sm')}
+        ${knob('wrap-hdg', 150, 346, 60, svgRound('hdg', true, false))}
+        ${rl('btn-hdghold', 226, 346, 28, G)}
+        ${L('ЗАДАНИЕ КУРСА', 150, 384, 'xs', WH, 'font-size:10px')}${L('ДЕРЖ', 226, 370, 'xs', WH, 'font-size:10px')}
+        <div class="fdsw" id="fd-L" style="${ctr(190, 416, 34, 46)}"><i class="lv"></i></div>
+        ${L('ПД', 190, 443, 'xs')}`;
+
+        return sec(0, 0, 1335, 340, TOP) + sec(25, 380, 400, 450, A) + sec(455, 350, 450, 527, B) + sec(930, 370, 380, 450, C);
     }
 
     // ====================================================== LAYOUT: A350 FCU
@@ -711,7 +1155,6 @@
         ${disp('disp-vs', 605, 123, 124, 38, 'lcd s2')}
         ${knob('wrap-ias', 88, 203, 76, cream('ias', true, false))}
         ${knob('wrap-hdg', 228, 203, 92, cream('hdg', false, true))}
-
         ${knob('wrap-alt', 473, 203, 88, cream('alt', true, false))}
         ${knob('wrap-vs', 618, 207, 66, cream('vs', false, false))}
         ${ab('btn-cmda', 349, 133)}${ab('btn-cmdb', 322, 203)}${ab('btn-athr', 381, 203)}${ab('btn-app', 349, 267)}
@@ -724,7 +1167,7 @@
         b737:   { name: 'b737',   W: 1592, H: 253, scale: 0.72, iasW: 4, vsStyle: 'signed', banks: [10, 15, 20, 25, 30], bankAngles: [-55, -27.5, 0, 27.5, 55], bankDefault: 4, capR: 0.5, build: build737 },
         b747:   { name: 'b747', drum: true,   W: 1480, H: 266, scale: 0.80, iasW: 3, vsStyle: 'blank',  banks: [null, 5, 10, 15, 20, 25], bankAngles: [-90, -60, -30, 0, 30, 60], bankDefault: 0, capR: 0.56, build: build747 },
         airbus: { name: 'airbus', W: 810,  H: 228, scale: 1.30, iasW: 3, vsStyle: 'signed',  build: buildAirbus },
-        tu144: { name: 'tu144', drum: true, W: 1420, H: 410, scale: 0.7, iasW: 3, vsStyle: 'signed', build: buildTu144 },
+        tu144: { name: 'tu144', drum: true, W: 1335, H: 910, scale: 0.6, iasW: 3, vsStyle: 'signed', build: buildTu144 },
         a350: { name: 'a350', W: 720, H: 300, scale: 1.30, iasW: 3, vsStyle: 'signed', build: buildA350 },
         antonov: { name: 'antonov', drum: true, W: 1400, H: 380, scale: 0.72, iasW: 3, vsStyle: 'signed',  build: buildAntonov }
     };
@@ -743,7 +1186,7 @@
         MD_DC:          th({ layout: 'md11', bg: '#6a665c', border: '#2b2926', txt: '#f2efe6', disp: '#ffa530', k1: '#a8a49a', k2: '#59564e' }),
         CONCORDE:       th({ layout: 'concorde', dtype: 'drum', bg: '#30363b', border: '#08080a', txt: '#e8e6df', disp: '#f4f1e6', k1: '#6e6e70', k2: '#2c2c2e' }),
         ANTONOV:        th({ layout: 'antonov', dtype: 'drum', bg: '#161b1e', border: '#050607', txt: '#eea67c', disp: '#f2f2f2', k1: '#6a7075', k2: '#1a1d20' }),
-        TU144:          th({ layout: 'tu144', dtype: 'drum', bg: '#17b3b8', border: '#0a4f53', txt: '#0a1f21', disp: '#f2f2f2', k1: '#5a5d60', k2: '#141516' }),
+        TU144:          th({ layout: 'tu144', dtype: 'drum', bg: '#1f9fae', border: '#0b4650', txt: '#0a1f21', disp: '#f2f2f2', k1: '#5a5d60', k2: '#141516' }),
         SOVIET_TEAL:    th({ bg: '#8fb2a6', border: '#3a554d', txt: '#10211c', disp: '#ff6a2a', k1: '#aab8b3', k2: '#55635e' }),
         SOVIET_FIGHTER: th({ bg: '#5b8e93', border: '#243d41', txt: '#08191b', disp: '#9dff6a', k1: '#9bb7ba', k2: '#4a6568' }),
         MIL_DARK:       th({ bg: '#33383e', border: '#141619', txt: '#d9dde0', disp: '#7dff6a', k1: '#7d838a', k2: '#3c4147' }),
@@ -785,7 +1228,6 @@
     // ------------------------------------------------------------ DOM setup
     const container = document.createElement('div');
     container.id = 'geofs-mcp-container';
-
     container.innerHTML = '<div id="mcp-stage"></div>';
     document.body.appendChild(container);
     const stage = $('mcp-stage');
@@ -805,7 +1247,6 @@
         stage.style.transform = `scale(${s})`;
     }
 
-
     tab.addEventListener('click', () => {
         container.style.display = container.style.display === 'block' ? 'none' : 'block';
     });
@@ -822,7 +1263,7 @@
     // drag the panel by its background
     let isDraggingPanel = false, dragStartX = 0, dragStartY = 0;
     container.addEventListener('mousedown', e => {
-        if (e.target.closest('.btn,.rbtn,.rl,.scope,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.tsw,.afs,.afbox,.disengage')) return;
+        if (e.target.closest('.btn,.rbtn,.rl,.scope,.disp,.knob,.vsw,.fdsw,.rsw,.atsw,.tsw,.afs,.afbox,.disengage,.ann,.tgl,.selk,.rk,.rb,.sw,.ipo')) return;
         isDraggingPanel = true;
         dragStartX = e.clientX - container.offsetLeft;
         dragStartY = e.clientY - container.offsetTop;
@@ -838,7 +1279,6 @@
     window.addEventListener('mouseup', () => { isDraggingPanel = false; });
 
     // ---------------------------------------------------------------- values
-
     const values = { ias: 250, hdg: 270, vs: 0, alt: 5000, crs: 0 };
     const STEP = { ias: 1, hdg: 1, crs: 1, vs: 100, alt: 100 };
     const rot = { ias: 0, hdg: 0, crs: 0, alt: 0, vs: 0 };
@@ -848,7 +1288,6 @@
     let bankIdx = 0, atOn = false, fdOn = true, apChannel = 'A', atAngle = 180;
     const localLit = {};
 
-
     const dispIds = { ias: ['disp-ias'], hdg: ['disp-hdg', 'disp-hdg2'], alt: ['disp-alt', 'disp-alt2'], vs: ['disp-vs'], crs: ['disp-crsL', 'disp-crsR'] };
     const dialIds = { ias: ['dial-ias'], hdg: ['dial-hdg', 'dial-hdg2'], alt: ['dial-alt'], crs: ['dial-crsL', 'dial-crsR'] };
     const isDrum = () => !!curTheme && curTheme.dtype === 'drum';
@@ -856,7 +1295,7 @@
     function fmt(p) {
         const v = values[p];
         switch (p) {
-            case 'ias': return String(Math.round(v)).padStart(layout.iasW, ' ').slice(-layout.iasW);
+            case 'ias': return String(Math.round(v)).padStart(layout.iasW, (layout.name === 'tu144' && isDrum()) ? '0' : ' ').slice(-layout.iasW);
             case 'hdg':
             case 'crs': return String(v).padStart(3, '0');
             case 'alt': return String(v).padStart(5, isDrum() ? '0' : ' ').slice(-5);
@@ -893,12 +1332,10 @@
             if (g) g.style.transform = `rotate(${rot.vs}deg)`;
         } else {
             (dialIds[p] || []).forEach(id => {
-
                 const g = $(id);
                 if (g) g.style.transform = `rotate(${rot[p]}deg)`;
             });
         }
-
     }
 
     function setBank(i, user) {
@@ -937,6 +1374,7 @@
     // ------------------------------------------------------------ OPTIONS
     const OPT = { hideInop: false };
     try { OPT.hideInop = localStorage.getItem('geofs-mcp-hide-inop') === '1'; } catch (e) {}
+
     function updateTabText() {
         tab.textContent = '🎛️ MCP PANEL' + (OPT.hideInop ? ' · active buttons only' : '');
     }
@@ -948,7 +1386,6 @@
         try {
             if (typeof geofs === 'undefined' || !geofs.autopilot) return;
             const def = geofs.autopilot.definition;
-
             if (!def || typeof def.maxBankAngle !== 'number') return;
             if (bankDef !== def) { bankDef = def; bankOrig = def.maxBankAngle; }
             const deg = layout.banks[bankIdx];
@@ -972,6 +1409,7 @@
         } catch (e) {}
         return null;
     }
+
     function ownPos() {
         try {
             const l = geofs.aircraft.instance.llaLocation;
@@ -998,8 +1436,8 @@
         const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(dLon);
         return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
     }
-    function setVal(key, val) {
 
+    function setVal(key, val) {
         let diff = val - values[key];
         if (key === 'hdg') { if (diff > 180) diff -= 360; if (diff < -180) diff += 360; }
         values[key] = val;
@@ -1050,7 +1488,6 @@
         if (apOn()) {
             if (apModes().verticalSpeed) toggleGeoFSMode('verticalSpeed');
             if (captured && !apModes().altitude) toggleGeoFSMode('altitude');
-
         }
         syncRealLamps();
     }
@@ -1100,9 +1537,7 @@
                   'btn-goaround', 'btn-land', 'btn-mach2', 'btn-maxclimb', 'btn-ias2', 'btn-glide', 'btn-maxcruise',
                   'btn-altacq', 'btn-at2', 'btn-co', 'btn-sel', 'btn-spdmach', 'btn-hdgtrk', 'btn-metric', 'btn-truemag'];
 
-
     // ---- interaction
-    // wheelMap: element id -> parameter it controls (filled by makeInteractive)
     const wheelMap = {};
     let dragState = null, holdTimer = null;
     window.addEventListener('mousemove', e => {
@@ -1123,8 +1558,7 @@
         if (d) d.classList.remove('press');
     });
 
-    // MOUSE WHEEL over any knob / display / V-S wheel: one window-level capture handler,
-    // so it works on every layout, survives layout rebuilds and beats GeoFS' own zoom handler.
+    // MOUSE WHEEL over any knob / display / V-S wheel
     window.addEventListener('wheel', e => {
         if (e.altKey) {                     // Alt + wheel over the panel = resize
             if (container.style.display === 'block' && e.target.closest && e.target.closest('#geofs-mcp-container')) {
@@ -1188,7 +1622,6 @@
     };
 
     function getPlaneHeading() {
-
         try {
             if (typeof geofs !== 'undefined') {
                 if (geofs.animation && geofs.animation.values) {
@@ -1220,7 +1653,6 @@
                 const val = values[key];
                 domSelectors[key].forEach(sel => {
                     document.querySelectorAll(sel).forEach(el => {
-
                         if ((el.tagName === 'INPUT' || typeof el.value !== 'undefined') && el.value != val) {
                             el.value = val;
                             el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1240,7 +1672,6 @@
                         input.value = values.hdg;
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                         input.dispatchEvent(new Event('change', { bubbles: true }));
-
                     }
                 }
             });
@@ -1271,7 +1702,6 @@
     }
 
     function toggleGeoFSMode(modeName, forceState) {
-
         try {
             if (typeof geofs !== 'undefined' && geofs.autopilot) {
                 if (!geofs.autopilot.on && forceState !== false) {
@@ -1292,7 +1722,6 @@
                     geofs.autopilot.modes.heading = true;
                     geofs.autopilot.modes.targetHeading = true;
                 }
-
 
                 lastInteractionTime.hdg = Date.now();
                 pushValuesToGeoFS();
@@ -1321,7 +1750,6 @@
         atAnim = requestAnimationFrame(step);
     }
     function setAT(on) {
-
         atOn = !!on;
         const lever = $('at-lever');
         if (lever) {
@@ -1371,7 +1799,6 @@
                 else geofs.autopilot.on = false;
             }
             pushValuesToGeoFS();
-
             syncModeButtons();
         } catch (err) {
             console.warn('[GeoFS MCP] Engage notice:', err);
@@ -1417,11 +1844,11 @@
             if (e) e.addEventListener('click', () => toggleGeoFSMode(REAL_MODES[id]));
         });
         const at = $('atsw');
+
         if (at) {
             let y0 = null;
             at.addEventListener('mousedown', e => {
                 if (e.button !== 0) return;
-
                 y0 = e.clientY;
                 e.stopPropagation();
                 e.preventDefault();
@@ -1448,8 +1875,9 @@
         setOn('btn-altintv', STEP.alt > 100);
         const ak = $('wrap-alt');
         if (ak && $('btn-altintv') === null) ak.addEventListener('contextmenu', e => { toggleIntv('alt'); e.preventDefault(); });
+
         const sc = $('tu-scope');
-        if (sc) sc.addEventListener('click', () => sc.classList.toggle('on'));
+        if (sc) { sc.title = 'Click: indicator screen on / off'; sc.addEventListener('click', () => sc.classList.toggle('on')); }
         const sy = $('btn-sync');
         if (sy) sy.addEventListener('click', () => {
             const h = getPlaneHeading();
@@ -1457,6 +1885,87 @@
             sy.classList.add('on');
             setTimeout(() => sy.classList.remove('on'), 350);
         });
+
+        // ---- Tu-144 extras -------------------------------------------------
+        stage.querySelectorAll('.selk').forEach(el => {
+            const angs = (el.dataset.angs || '0').split(',').map(Number);
+            let i = Math.min(angs.length - 1, Math.max(0, parseInt(el.dataset.i, 10) || 0));
+            const g = el.querySelector('.rot');
+            const apply = () => {
+                if (g) g.style.transform = `rotate(${angs[i]}deg)`;
+                if (el.dataset.fx === 'lamp') {                       // ЛАМПА 1-4 = indicator brightness
+                    const s = $('tu-scope');
+                    if (s) s.style.filter = `brightness(${[0.55, 0.8, 1, 1.25][i] || 1})`;
+                }
+            };
+            apply();
+            el.addEventListener('click', () => { i = (i + 1) % angs.length; apply(); });
+            el.addEventListener('contextmenu', e => { e.preventDefault(); i = (i - 1 + angs.length) % angs.length; apply(); });
+        });
+        stage.querySelectorAll('.tgl').forEach(el => el.addEventListener('click', () => el.classList.toggle('up')));
+        stage.querySelectorAll('.free').forEach(el => el.addEventListener('click', () => el.classList.toggle('on')));
+        // ВВОД advances the КАДР (frame) counter, or cycles radar range in radar mode
+        const vv = $('tu-vvod'), kd = $('tu-kadr');
+        if (vv && kd) {
+            let n = 112;
+            const draw = () => { kd.innerHTML = `<div class="dr">${String(n).padStart(3, '0').split('').map(c => `<span>${c}</span>`).join('')}</div>`; };
+            draw();
+            vv.addEventListener('click', () => { if (radarOn) { cycleRadarRange(); return; } n = n % 999 + 1; draw(); });
+        }
+
+        const rb = $('tu-rdr');
+        if (rb) rb.addEventListener('click', () => setRadar(!radarOn));
+        stage.querySelectorAll('.rk').forEach(el => {
+            const angs = (el.dataset.angs || '0').split(',').map(Number);
+            let i = Math.min(angs.length - 1, Math.max(0, parseInt(el.dataset.i, 10) || 0));
+            const g = el.querySelector('.rot');
+            const apply = () => {
+                if (g) g.style.transform = `rotate(${angs[i]}deg)`;
+                switch (el.id) {
+                    case 'rk-mode': rlsState.mode = i; applyRls(); break;
+                    case 'rk-bright': rlsState.bright = i; applyRls(); break;
+                    case 'rk-contr': rlsState.contr = i; applyRls(); break;
+                    case 'rk-marks': rlsState.marks = i; applyRls(); break;
+                    case 'rk-range': radarRangeIdx = 4 - i; updateRadarRange(); updateRadar(); break;
+                }
+            };
+            apply();
+            const step = d => { i = (i + d + angs.length) % angs.length; apply(); };
+            el.addEventListener('click', () => step(1));
+            el.addEventListener('contextmenu', e => { e.preventDefault(); step(-1); });
+            el.addEventListener('wheel', e => { e.preventDefault(); e.stopPropagation(); step(e.deltaY < 0 ? 1 : -1); }, { passive: false });
+        });
+        const pw = $('tu-podsvet');
+        if (pw) {
+            pw.addEventListener('wheel', e => {
+                e.preventDefault(); e.stopPropagation();
+                podsvet = Math.max(0, Math.min(10, podsvet + (e.deltaY < 0 ? 1 : -1))); applyPodsvet();
+            }, { passive: false });
+            pw.addEventListener('mousedown', e => { if (e.button !== 0) return; podDrag = { y: e.clientY, acc: 0 }; e.preventDefault(); e.stopPropagation(); });
+        }
+        applyPodsvet();
+        const ip = $('tu-ipo');
+        if (ip) ip.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            const r = ip.getBoundingClientRect(), x = e.clientX - (r.left + r.width / 2), y = e.clientY - (r.top + r.height / 2);
+            e.preventDefault(); e.stopPropagation();
+            if (Math.hypot(x, y) < r.width * 0.16) { mapX = 0; mapY = 0; applyMapPan(); return; }
+            const dx = Math.abs(x) > Math.abs(y) ? (x > 0 ? 1 : -1) : 0, dy = dx ? 0 : (y > 0 ? 1 : -1);
+            ipoMove(dx, dy);
+            if (!holdTimer) holdTimer = setInterval(() => ipoMove(dx, dy), 90);
+        });
+        applyMapPan();
+        const rlsOn = $('rls-on'), rlsOff = $('rls-off');
+        if (rlsOn) rlsOn.addEventListener('click', () => { if (radarOn) cycleRadarRange(); else setRadar(true); });
+        if (rlsOff) rlsOff.addEventListener('click', () => setRadar(false));
+        const rays = stage.querySelector('.rlsrays');
+        if (rays && !rays.childNodes.length) {
+            let rr = '';
+            for (let a = -80; a <= 80; a += 8) rr += `<line x1="0" y1="0" x2="${(160 * Math.sin(a * Math.PI / 180)).toFixed(1)}" y2="${(-160 * Math.cos(a * Math.PI / 180)).toFixed(1)}"/>`;
+            rays.innerHTML = rr;
+        }
+        if (rb || rlsOn) setRadar(radarOn);
+
         syncRealLamps();
         INOP.forEach(id => {
             const e = $(id);
@@ -1469,7 +1978,6 @@
         [['btn-cmda', 'A'], ['btn-cmdb', 'B'], ['btn-cmdc', 'C']].forEach(([id, ch]) => {
             const e = $(id);
             if (e) e.addEventListener('click', () => toggleAP(ch));
-
         });
 
         const dis = $('btn-disengage');
@@ -1499,7 +2007,6 @@
 
     // ----------------------------------------------------- layout switching
     function buildLayout(name) {
-
         layout = LAYOUTS[name] || LAYOUTS.b737;
         W = layout.W; H = layout.H;
         stage.style.width = W + 'px';
@@ -1520,7 +2027,6 @@
         const need = !curTheme || curTheme.layout !== t.layout || curTheme.dtype !== t.dtype;
         curTheme = t;
         const vars = { '--bg': t.bg, '--border': t.border, '--txt': t.txt, '--disp': t.disp, '--face': t.face, '--k1': t.k1, '--k2': t.k2 };
-
         Object.keys(vars).forEach(k => {
             container.style.setProperty(k, vars[k]);
             tab.style.setProperty(k, vars[k]);
@@ -1552,7 +2058,6 @@
         const e = $('disp-mach');
         if (!e) return;
         let m = 0;
-
         try {
             if (typeof geofs !== 'undefined' && geofs.animation && geofs.animation.values) m = Number(geofs.animation.values.mach) || 0;
         } catch (err) {}
@@ -1570,8 +2075,8 @@
         updateMach();
         navTick();
         applyBankLimit();
-
         updateScope();
+        updateGauges();
 
         try {
             if (typeof geofs !== 'undefined' && geofs.autopilot) {
@@ -1607,7 +2112,6 @@
                                 if (diff < -180) diff += 360;
                             }
                             values[key] = rounded;
-
                             updateDisplay(key, diff);
                         }
                     }
@@ -1621,7 +2125,6 @@
 
     // ------------------------------------------------------------------ init
     updateTabText();
-
     applyTheme(THEMES.DEFAULT);
     setInterval(pullFromNativeUI, 200);
     setTimeout(() => {
