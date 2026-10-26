@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS Night Ground - city lights from satellite tiles + NASA map
 // @namespace    geofs-night-ground
-// @version      1
-// @description  Night ground = perfect middle-ground brightness for realistic night flying.
+// @version      3.1
+// @description  Night ground with Shift+X settings panel, saved settings, and yellow/orange/white lights.
 // @match        https://www.geo-fs.com/*
 // @match        https://beta.geo-fs.com/*
 // @run-at       document-end
@@ -13,7 +13,8 @@
     'use strict';
 
     const TAG = '[Night Ground]';
-    const VERSION = '2.8';
+    const VERSION = '3.1';
+    const STORE_KEY = 'geofsNightGroundSettings';
 
     if (window.__geofsNightGroundLoaded) {
         console.warn(TAG, 'a second Night Ground script is running (' + window.__geofsNightGroundLoaded + ' and ' + VERSION + '). Disable the old one in Tampermonkey!');
@@ -23,20 +24,40 @@
     const NASA_URL = 'https://svs.gsfc.nasa.gov/vis/a030000/a030000/a030003/dmsp_4096.png';
     const ESRI_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
-    const settings = window.geofsNightGround = {
-        version: VERSION,
+    const DEFAULTS = {
         enabled: true,
-        forceNight: false,    // Shift+X to test in daytime
-        brightness: 0.75,     // Sweet spot: brighter than v2.8, darker than v2.6
-        density: 0.95,        // Balanced fill
-        glow: 0.3,            // Subtle realistic ambient bloom
-        buildings: true,      // tint GeoFS 3D building models at night
-        maxLevel: 17,         // highest tile zoom requested
-        size: 1,              // Base light size
-        orangeShare: 0.18,    // 18% orange sodium lights, 82% warm yellow
-        yellow: [245, 195, 95],
-        orange: [240, 125, 35]
+        brightness: 0.75,
+        density: 0.95,
+        glow: 0.3,
+        buildings: true,
+        size: 1,
+        orangeShare: 0.20,   // ~20% orange
+        whiteShare: 0.10     // ~10% white (clustered in dense/commercial areas)
     };
+
+    const settings = window.geofsNightGround = Object.assign({
+        version: VERSION,
+        forceNight: false,   // Shift+F (not saved)
+        maxLevel: 17,
+        source: 'auto',
+        yellow: [245, 195, 95],
+        orange: [240, 125, 35],
+        white: [255, 245, 225]
+    }, DEFAULTS);
+
+    // ---- load saved settings ----
+    try {
+        const saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+        for (const k in DEFAULTS) if (saved[k] !== undefined && typeof saved[k] === typeof DEFAULTS[k]) settings[k] = saved[k];
+    } catch (e) {}
+
+    function saveSettings() {
+        try {
+            const out = {};
+            for (const k in DEFAULTS) out[k] = settings[k];
+            localStorage.setItem(STORE_KEY, JSON.stringify(out));
+        } catch (e) {}
+    }
 
     const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
     const hash = n => { const s = Math.sin(n * 12.9898) * 43758.5453; return s - Math.floor(s); };
@@ -105,7 +126,6 @@
 
     const NOISE = new Float32Array(65536);
     for (let i = 0; i < 65536; i++) NOISE[i] = hash(i + 0.5);
-    const pack = c => (255 << 24) | (c[2] << 16) | (c[1] << 8) | c[0];
 
     function renderNightTile(img, dens, level, x, y) {
         const S = 256;
@@ -121,9 +141,9 @@
         const lowZoom = level < 9;
         const seed = (x * 7919 + y * 104729 + level * 31) | 0;
         const cseed = (x * 17 + y * 29 + level) | 0;
-        const br = settings.brightness, og = settings.orangeShare;
-        const Y = settings.yellow, O = settings.orange;
-        const BLACK = pack([1, 1, 3]);
+        const br = settings.brightness, og = settings.orangeShare, ws = settings.whiteShare;
+        const Y = settings.yellow, O = settings.orange, W = settings.white;
+        const BLACK = (255 << 24) | (3 << 16) | (1 << 8) | 1;
 
         const thinningFactor = level < 11 ? Math.pow(0.55, 11 - level) : 1.0;
 
@@ -136,7 +156,7 @@
                 L = (n1 < dn * 0.32 * thinningFactor) ? 0.35 + 0.55 * n1 : 0;
             } else {
                 const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-                if (lum > 55) { // Slightly lowered threshold back down so neighborhood grids catch the light
+                if (lum > 55) {
                     const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
                     const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
                     const sat = (mx - mn) / (mx + 1);
@@ -164,7 +184,16 @@
             if (L <= 0) { u32[p] = BLACK; continue; }
             const row = p >> 8;
             const cell = NOISE[(((col >> 2) * 131 + (row >> 2) * 977 + cseed) & 65535)];
-            const c = cell < og ? O : Y;
+            // orange / white / yellow mix
+            // clustered mix: white concentrates in dense/commercial pockets, orange in broader patches
+            const c32 = NOISE[(((col >> 5) * 257 + (row >> 5) * 1031 + cseed * 3) & 65535)];
+            const c16 = NOISE[(((col >> 4) * 421 + (row >> 4) * 1553 + cseed * 5) & 65535)];
+            const c8  = NOISE[(((col >> 3) * 599 + (row >> 3) * 2027 + cseed * 7) & 65535)];
+            let cl = (0.5 * c32 + 0.3 * c16 + 0.2 * c8 - 0.25) * 2; cl = cl < 0 ? 0 : cl > 1 ? 1 : cl;
+            const pw = ws * 4 * cl * cl * (0.4 + 0.8 * dn);
+            const po = (og / (1 - ws)) * 2 * c16;
+            const cellW = NOISE[(((col >> 1) * 733 + (row >> 1) * 1297 + cseed * 11) & 65535)];
+            const c = cellW < pw ? W : (cell < po ? O : Y);
             let k = L * br; k = (k > 1 ? 1 : k < 0.2 ? 0.2 : k) * (0.75 + 0.25 * NOISE[(p * 7 + 3) & 65535]);
             u32[p] = (255 << 24) | ((c[2] * k) << 16) | ((c[1] * k) << 8) | (c[0] * k);
         }
@@ -266,8 +295,6 @@
         return { a: clamp((0.05 - d) / 0.2, 0, 1), pre: d < 0.35 };
     }
 
-    settings.source = 'auto';
-
     function findTilesets(scene) {
         const out = [];
         const walk = (col, depth) => {
@@ -283,7 +310,6 @@
 
     let nightStyle = null;
     function updateBuildings(viewer, isNight) {
-        if (!settings.buildings && !isNight) isNight = false;
         let sets;
         try { sets = findTilesets(viewer.scene); } catch (e) { return; }
         if (!nightStyle) {
@@ -310,14 +336,32 @@
     function start() {
         const viewer = getViewer();
         const layers = viewer.imageryLayers;
-        const layer = layers.addImageryProvider(createProvider());
-        layer.brightness = 1; layer.contrast = 1; layer.hue = 0; layer.saturation = 1; layer.gamma = 1;
-        layer.alpha = 0;
-        layer.show = false;
-
-        let lastLen = layers.length;
+        let layer = null;
+        let lastLen = 0;
         let lastBuildCheck = 0;
-        layer._nightGround = true;
+
+        function makeLayer() {
+            if (layer) { try { layers.remove(layer, true); } catch (e) {} }
+            layer = layers.addImageryProvider(createProvider());
+            layer.brightness = 1; layer.contrast = 1; layer.hue = 0; layer.saturation = 1; layer.gamma = 1;
+            layer.alpha = 0;
+            layer.show = false;
+            layer._nightGround = true;
+            lastLen = layers.length;
+        }
+        makeLayer();
+
+        // Tile look is baked in, so rebuild the layer after settings change
+        let rebuildTimer = null;
+        function scheduleRebuild() {
+            saveSettings();
+            clearTimeout(rebuildTimer);
+            rebuildTimer = setTimeout(() => {
+                makeLayer();
+                try { viewer.scene.requestRender(); } catch (e) {}
+            }, 400);
+        }
+
         viewer.scene.preRender.addEventListener(() => {
             if (layers.length !== lastLen || layers.indexOf(layer) !== layers.length - 1) {
                 lastLen = layers.length;
@@ -330,20 +374,112 @@
             if (now - lastBuildCheck > 1500) { lastBuildCheck = now; updateBuildings(viewer, st.a > 0.5); }
         });
 
+        // ---------- Settings panel (Shift+X) ----------
+        let panel = null;
+        const controls = {};
+
+        function buildPanel() {
+            panel = document.createElement('div');
+            panel.id = 'nightGroundPanel';
+            panel.style.cssText = 'position:fixed;top:80px;right:20px;z-index:99998;width:250px;' +
+                'background:rgba(15,15,20,0.92);color:#ffd27a;padding:12px 14px;border-radius:8px;' +
+                'font:13px sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.6);display:none;';
+            panel.addEventListener('keydown', e => e.stopPropagation());
+            panel.addEventListener('keyup', e => e.stopPropagation());
+
+            const title = document.createElement('div');
+            title.textContent = 'Night Ground v' + VERSION + '  (Shift+X to close)';
+            title.style.cssText = 'font-weight:bold;margin-bottom:8px;';
+            panel.appendChild(title);
+
+            function slider(key, label, min, max, step, fmt) {
+                const row = document.createElement('div');
+                row.style.margin = '6px 0';
+                const lab = document.createElement('div');
+                lab.style.cssText = 'display:flex;justify-content:space-between;';
+                const name = document.createElement('span'); name.textContent = label;
+                const val = document.createElement('span');
+                lab.appendChild(name); lab.appendChild(val);
+                const inp = document.createElement('input');
+                inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step;
+                inp.style.cssText = 'width:100%;';
+                const show = () => { val.textContent = fmt(settings[key]); inp.value = settings[key]; };
+                inp.addEventListener('input', () => {
+                    settings[key] = parseFloat(inp.value);
+                    val.textContent = fmt(settings[key]);
+                    scheduleRebuild();
+                });
+                row.appendChild(lab); row.appendChild(inp);
+                panel.appendChild(row);
+                controls[key] = show; show();
+            }
+
+            function check(key, label, onChange, persist) {
+                const row = document.createElement('label');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:6px 0;cursor:pointer;';
+                const inp = document.createElement('input');
+                inp.type = 'checkbox';
+                inp.addEventListener('change', () => {
+                    settings[key] = inp.checked;
+                    if (persist) saveSettings();
+                    if (onChange) onChange();
+                });
+                row.appendChild(inp);
+                row.appendChild(document.createTextNode(label));
+                panel.appendChild(row);
+                controls[key] = () => { inp.checked = !!settings[key]; };
+                controls[key]();
+            }
+
+            const pct = v => Math.round(v * 100) + '%';
+            slider('brightness', 'Brightness', 0.2, 2, 0.05, v => v.toFixed(2));
+            slider('density', 'Density', 0.2, 1.6, 0.05, v => v.toFixed(2));
+            slider('glow', 'Glow', 0, 1, 0.05, v => v.toFixed(2));
+            slider('size', 'Light size', 1, 3, 1, v => String(v));
+            slider('orangeShare', 'Orange mix', 0, 0.6, 0.01, pct);
+            slider('whiteShare', 'White mix', 0, 0.2, 0.01, pct);
+            check('enabled', 'Night Ground enabled', null, true);
+            check('buildings', 'Tint 3D buildings at night', null, true);
+            check('forceNight', 'Force night (test in daytime)', null, false);
+
+            const reset = document.createElement('button');
+            reset.textContent = 'Reset to defaults';
+            reset.style.cssText = 'margin-top:8px;width:100%;padding:5px;cursor:pointer;';
+            reset.addEventListener('click', () => {
+                Object.assign(settings, DEFAULTS);
+                for (const k in controls) controls[k]();
+                scheduleRebuild();
+                toast('Night Ground reset to defaults');
+            });
+            panel.appendChild(reset);
+
+            document.body.appendChild(panel);
+        }
+
+        function togglePanel() {
+            if (!panel) buildPanel();
+            const open = panel.style.display === 'none';
+            if (open) for (const k in controls) controls[k]();
+            panel.style.display = open ? 'block' : 'none';
+        }
+
         window.addEventListener('keydown', (e) => {
-            if (!e.shiftKey || /input|textarea/i.test((e.target || {}).tagName || '')) return;
+            if (!e.shiftKey || /input|textarea|select/i.test((e.target || {}).tagName || '')) return;
             const k = e.key.toLowerCase();
-            if (k === 'n') settings.enabled = !settings.enabled;
-            else if (k === 'x') settings.forceNight = !settings.forceNight;
-            else if (e.key === '}' || e.key === ']') settings.brightness = Math.min(2, settings.brightness + 0.1);
-            else if (e.key === '{' || e.key === '[') settings.brightness = Math.max(0.2, settings.brightness - 0.1);
-            else if (k === 'd') settings.density = settings.density >= 1.4 ? 0.4 : settings.density + 0.2;
+            if (k === 'x') { togglePanel(); return; }
+            else if (k === 'n') { settings.enabled = !settings.enabled; saveSettings(); }
+            else if (k === 'f') settings.forceNight = !settings.forceNight;
+            else if (e.key === '}' || e.key === ']') { settings.brightness = Math.min(2, settings.brightness + 0.1); scheduleRebuild(); }
+            else if (e.key === '{' || e.key === '[') { settings.brightness = Math.max(0.2, settings.brightness - 0.1); scheduleRebuild(); }
+            else if (k === 'd') { settings.density = settings.density >= 1.4 ? 0.4 : settings.density + 0.2; scheduleRebuild(); }
             else return;
-            toast('Night Ground ' + (settings.enabled ? 'on' : 'off') + ' (Brightness: ' + settings.brightness.toFixed(2) + ')');
+            if (panel) for (const c in controls) controls[c]();
+            toast('Night Ground ' + (settings.enabled ? 'on' : 'off') + (settings.forceNight ? ' (forced night)' : '') +
+                  ' | Brightness: ' + settings.brightness.toFixed(2));
             try { viewer.scene.requestRender(); } catch (er) {}
         });
 
-        toast('Night Ground v' + VERSION + ' loaded (Balanced Brightness)', 5000);
+        toast('Night Ground v' + VERSION + ' loaded - Shift+X for settings', 5000);
         console.log(TAG, 'v' + VERSION + ' active.');
     }
 
