@@ -1,0 +1,1159 @@
+// ==UserScript==
+// @name         GeoFS FMC
+// @namespace    GeoFS-FMC
+// @version      1.2
+// @description  Boeing 737-style FMC/CDU. Button docks into the GeoFS bottom bar (next to MCP PANEL). Colours change with the aircraft. Picks up a flight plan loaded in GeoFS and draws the route on the 3D globe. Pages: IDENT, POS INIT, RTE, DEP/ARR, LEGS, PROG, PERF INIT, TAKEOFF REF, APPROACH REF, THRUST LIM, VNAV, FIX, MENU and a PUSHBACK page that drives the "GeoFS Y Pushback Planner" script.
+// @match        https://*.geo-fs.com/*
+// @match        https://geo-fs.com/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+'use strict';
+
+['geofs-fmc-container', 'geofs-fmc-tab', 'geofs-fmc-style'].forEach(function (id) {
+    const e = document.getElementById(id);
+    if (e) e.remove();
+});
+
+const $ = function (id) { return document.getElementById(id); };
+
+// ------------------------------------------------------------------ CSS
+const style = document.createElement('style');
+style.id = 'geofs-fmc-style';
+style.textContent = `
+#geofs-fmc-container{position:fixed;left:20px;top:60px;z-index:999999;display:none;width:290px;height:510px;
+    transform-origin:0 0;user-select:none;cursor:move;border-radius:12px;box-shadow:0 14px 40px rgba(0,0,0,.85);
+    background:linear-gradient(180deg,var(--hb1,#767c82),var(--hb2,#4d5359));border:3px solid var(--bd,#1b1e21);box-sizing:border-box;
+    font-family:Arial,Helvetica,sans-serif}
+#fmc-screen{position:absolute;left:36px;top:14px;width:218px;height:232px;box-sizing:border-box;background:#000;
+    border:4px solid var(--sbd,#14161a);border-radius:6px;box-shadow:inset 0 0 12px #000,0 0 0 2px var(--sbd2,#3a3f44);overflow:hidden;
+    font-family:'Courier New',Courier,monospace;font-weight:bold;color:var(--scr,#fff);padding:2px 3px;cursor:default}
+#fmc-screen .ttl{height:22px;line-height:22px;text-align:center;font-size:14px;position:relative;white-space:pre}
+#fmc-screen .ttl i{position:absolute;right:0;top:0;font-style:normal;font-size:12px}
+#fmc-screen .lb,#fmc-screen .dt{display:flex;justify-content:space-between;white-space:pre}
+#fmc-screen .lb{height:11px;line-height:11px;font-size:9px;color:#d8d8d8;padding:0 2px}
+#fmc-screen .dt{height:17px;line-height:17px;font-size:14px}
+#fmc-screen .dt span:nth-child(2),#fmc-screen .lb span:nth-child(2){flex:1;text-align:center}
+#fmc-screen .scr{position:absolute;left:3px;right:3px;bottom:2px;height:22px;line-height:22px;font-size:14px;white-space:pre;overflow:hidden}
+#fmc-screen .g{color:#4dff6a}#fmc-screen .m{color:#ff5cf0}#fmc-screen .c{color:#4fe3ff}#fmc-screen .a{color:#ffb340}#fmc-screen .r{color:#ff6a5a}
+.fmc-lsk{position:absolute;width:20px;height:12px;border-radius:3px;cursor:pointer;
+    background:linear-gradient(var(--k1,#3a3d41),var(--k3,#16171a));border:1px solid #050505;box-shadow:inset 0 1px 1px rgba(255,255,255,.25),0 2px 3px rgba(0,0,0,.6)}
+.fmc-lsk:active{transform:translateY(1px)}
+.fmc-k{position:absolute;box-sizing:border-box;border-radius:4px;cursor:pointer;color:var(--kt,#f2f2f2);font-weight:bold;text-align:center;
+    display:flex;align-items:center;justify-content:center;line-height:1.05;
+    background:linear-gradient(var(--k1,#3b3e42),var(--k2,#17181a) 70%,var(--k3,#0e0e0f));border:1px solid #050505;
+    box-shadow:inset 0 1px 1px rgba(255,255,255,.28),0 2px 3px rgba(0,0,0,.65)}
+.fmc-k:active{transform:translateY(1px);filter:brightness(.8)}
+.fmc-k.fn{font-size:9px;width:40px;height:24px}
+.fmc-k.pd{font-size:12px;width:30px;height:20px;background:linear-gradient(var(--p1,#e6e6e2),var(--p2,#aaaaa5) 70%,var(--p3,#8c8c88));color:var(--pt,#111);
+    box-shadow:inset 0 1px 1px #fff,0 2px 3px rgba(0,0,0,.65)}
+.fmc-k.pd.dk{background:linear-gradient(var(--k1,#3b3e42),var(--k2,#17181a) 70%,var(--k3,#0e0e0f));color:var(--kt,#f2f2f2)}
+.fmc-k .lamp{position:absolute;left:6px;top:3px;width:14px;height:4px;border-radius:1px;background:#3a2a10}
+.fmc-k.on .lamp{background:#ffbf3a;box-shadow:0 0 8px 2px rgba(255,180,40,.8)}
+#fmc-label{position:absolute;left:0;right:0;bottom:3px;text-align:center;font-size:8px;color:var(--lt,#c8ccd0);letter-spacing:1px;pointer-events:none}
+.fmc-toggle-tab{background:var(--tbg,#26282a);color:var(--ttx,#f3f3f3);border:1px solid var(--tbd,#575b5f);padding:0 14px;margin:0 3px;
+    border-radius:4px;cursor:pointer;font-family:monospace;font-weight:bold;font-size:12px;
+    height:30px;line-height:28px;min-width:0;text-transform:none;vertical-align:middle;transition:background .4s,border-color .4s}
+.fmc-toggle-tab.floating{position:fixed;bottom:0;left:calc(50% + 84px);z-index:999998;
+    height:auto;line-height:normal;padding:6px 18px;border-radius:6px 6px 0 0;border-bottom:none;margin:0;
+    box-shadow:0 -4px 10px rgba(0,0,0,.5)}
+`;
+document.head.appendChild(style);
+
+// ------------------------------------------------------------------ DOM
+const container = document.createElement('div');
+container.id = 'geofs-fmc-container';
+document.body.appendChild(container);
+
+// toggle button: docked into the GeoFS bottom bar (falls back to a floating tab)
+const tab = document.createElement('button');
+tab.id = 'geofs-fmc-tab';
+tab.className = 'mdl-button mdl-js-button geofs-f-standard-ui fmc-toggle-tab';
+tab.textContent = '🖥️ FMC';
+tab.addEventListener('click', function () { tab.blur(); });
+function dockTab() {
+    const bar = document.querySelector('.geofs-ui-bottom');
+    if (bar) {
+        if (tab.parentNode !== bar) {
+            const m = $('geofs-mcp-tab');
+            if (m && m.parentNode === bar) m.after(tab); else bar.appendChild(tab);
+        }
+        tab.classList.remove('floating');
+    } else {
+        if (!tab.parentNode) document.body.appendChild(tab);
+        tab.classList.add('floating');
+    }
+}
+dockTab();
+setInterval(dockTab, 2000);   // re-dock if GeoFS rebuilds its bar
+
+let scale = 1, placed = false;
+function applyScale() { container.style.transform = 'scale(' + scale + ')'; }
+applyScale();
+
+tab.addEventListener('click', function () {
+    const show = container.style.display !== 'block';
+    container.style.display = show ? 'block' : 'none';
+    if (show && !placed) {
+        placed = true;
+        container.style.left = Math.max(10, window.innerWidth - 330) + 'px';
+        container.style.top = Math.max(10, window.innerHeight - 560) + 'px';
+    }
+    if (show) render();
+});
+
+// ---- screen, LSKs, keys
+let html = '<div id="fmc-screen"></div>';
+for (let i = 0; i < 6; i++) {
+    const y = 18 + 2 + 22 + i * 28 + 11 + 8 - 6;      // aligned with the data line of row i
+    html += '<div class="fmc-lsk" data-s="L" data-i="' + i + '" style="left:10px;top:' + y + 'px"></div>';
+    html += '<div class="fmc-lsk" data-s="R" data-i="' + i + '" style="left:260px;top:' + y + 'px"></div>';
+}
+const FN = [
+    [['INIT<br>REF', 'INITREF'], ['RTE', 'RTE'], ['DEP<br>ARR', 'DEPARR'], ['ATC', 'ATC'], ['VNAV', 'VNAV']],
+    [['FIX', 'FIX'], ['LEGS', 'LEGS'], ['HOLD', 'HOLD'], ['FMC<br>COMM', 'COMM'], ['PROG', 'PROG'], ['EXEC', 'EXEC']],
+    [['MENU', 'MENU'], ['N1<br>LIMIT', 'N1'], ['PREV<br>PAGE', 'PREV'], ['NEXT<br>PAGE', 'NEXT']]
+];
+FN.forEach(function (r, ri) {
+    r.forEach(function (k, ci) {
+        html += '<div class="fmc-k fn" data-k="' + k[1] + '" style="left:' + (14 + ci * 45) + 'px;top:' + (264 + ri * 29) + 'px">' +
+            k[0] + (k[1] === 'EXEC' ? '<i class="lamp" id="fmc-exec-lamp"></i>' : '') + '</div>';
+    });
+});
+const PAD = [
+    ['1', '2', '3', 'A', 'B', 'C', 'D', 'E'],
+    ['4', '5', '6', 'F', 'G', 'H', 'I', 'J'],
+    ['7', '8', '9', 'K', 'L', 'M', 'N', 'O'],
+    ['.', '0', '+/-', 'P', 'Q', 'R', 'S', 'T'],
+    ['', '', '', 'U', 'V', 'W', 'X', 'Y'],
+    ['', '', '', 'Z', 'SP', 'DEL', '/', 'CLR']
+];
+PAD.forEach(function (r, ri) {
+    r.forEach(function (k, ci) {
+        if (!k) return;
+        const dk = (ci < 3 || k === 'SP' || k === 'DEL' || k === 'CLR' || k === '/') ? ' dk' : '';
+        html += '<div class="fmc-k pd' + dk + '" data-k="' + k + '" style="left:' + (14 + ci * 33.5) + 'px;top:' + (362 + ri * 23) + 'px">' + k + '</div>';
+    });
+});
+html += '<div id="fmc-label">FMC · hover + type · Alt+wheel = resize</div>';
+container.innerHTML = html;
+const screen = $('fmc-screen');
+
+// ------------------------------------------------------------------ per-aircraft colours
+function shade(hex, f) {
+    const n = parseInt(hex.slice(1), 16);
+    let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    const t = f < 0 ? 0 : 255, p = Math.abs(f);
+    r = Math.round(r + (t - r) * p); g = Math.round(g + (t - g) * p); b = Math.round(b + (t - b) * p);
+    return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+}
+// bg = housing, bd = housing edge, key = dark function keys, pad = letter/number keys, pt = pad text, scr = screen text tint
+const FTH = {
+    BOEING_NG:      { bg: '#767c82', bd: '#1b1e21', key: '#3b3e42', pad: '#e6e6e2', pt: '#111111', scr: '#ffffff' },
+    BOEING_WIDE:    { bg: '#8c877b', bd: '#2f2c27', key: '#3a3935', pad: '#ece8dc', pt: '#14120e', scr: '#ffffff' },
+    BOEING_BROWN:   { bg: '#6d5a4a', bd: '#2a2018', key: '#33291f', pad: '#e8dfcf', pt: '#1a130c', scr: '#fff6e6' },
+    BOEING_TAN:     { bg: '#a48d79', bd: '#3b3025', key: '#3c3229', pad: '#f0e8da', pt: '#1a130c', scr: '#fff6e6' },
+    BOEING_CLASSIC: { bg: '#6a7463', bd: '#2a2f26', key: '#33392f', pad: '#dfe2d4', pt: '#10130d', scr: '#ffe2b0' },
+    AIRBUS:         { bg: '#3d4650', bd: '#161b20', key: '#262d34', pad: '#4a545e', pt: '#f1f4f6', scr: '#ffffff' },
+    AIRBUS350:      { bg: '#3d4960', bd: '#131a28', key: '#232c3e', pad: '#465270', pt: '#eef2f7', scr: '#ffffff' },
+    MD_DC:          { bg: '#6a665c', bd: '#2b2926', key: '#35332e', pad: '#d9d5c8', pt: '#16140f', scr: '#ffe2b0' },
+    MD11:           { bg: '#555c62', bd: '#202427', key: '#2e3337', pad: '#d4d8dc', pt: '#111417', scr: '#ffffff' },
+    CONCORDE:       { bg: '#30363b', bd: '#08080a', key: '#1d2125', pad: '#5a6168', pt: '#e8e6df', scr: '#fff3d0' },
+    ANTONOV:        { bg: '#242b2f', bd: '#050607', key: '#15191c', pad: '#3b4348', pt: '#eea67c', scr: '#ffd9b8' },
+    TU144:          { bg: '#1f9fae', bd: '#0b4650', key: '#173b40', pad: '#cfe8ea', pt: '#0a1f21', scr: '#e6fff2' },
+    SOVIET_TEAL:    { bg: '#8fb2a6', bd: '#3a554d', key: '#2f4540', pad: '#e3eee9', pt: '#10211c', scr: '#e6fff2' },
+    SOVIET_FIGHTER: { bg: '#5b8e93', bd: '#243d41', key: '#25393c', pad: '#d4e6e8', pt: '#08191b', scr: '#e6fff0' },
+    MIL_DARK:       { bg: '#33383e', bd: '#141619', key: '#22262a', pad: '#9aa0a6', pt: '#0b0c0d', scr: '#d8ffd0' },
+    MIL_BLACK:      { bg: '#1f2124', bd: '#09090a', key: '#141618', pad: '#41464b', pt: '#cdd3d6', scr: '#d0ffe0' },
+    HELI:           { bg: '#3b4045', bd: '#1a1d20', key: '#262a2e', pad: '#7f858b', pt: '#0e0f10', scr: '#ffe2b0' },
+    GA_TAN:         { bg: '#8d7e69', bd: '#3a3226', key: '#3a3329', pad: '#e8dfcd', pt: '#17120c', scr: '#ffe2b0' },
+    GA_GLASS:       { bg: '#2a2d32', bd: '#0e1013', key: '#1a1c20', pad: '#4a4f56', pt: '#e6e9ec', scr: '#ffffff' },
+    REGIONAL_GREY:  { bg: '#5b646c', bd: '#292e33', key: '#2f353a', pad: '#d9dde0', pt: '#111417', scr: '#ffe9c0' },
+    EMBRAER:        { bg: '#3d474f', bd: '#191f24', key: '#242b31', pad: '#c8d0d5', pt: '#0e1114', scr: '#d8ffe6' }
+};
+FTH.DEFAULT = FTH.BOEING_NG;
+
+const FTH_RULES = [
+    [/\btu[- ]?144|concordski/, 'TU144'],
+    [/\ban[- ]?(124|225)\b|ruslan|mriya/, 'ANTONOV'],
+    [/concorde/, 'CONCORDE'],
+    [/\ban[- ]?(12[0-9]|22[0-9]|7[0-9]|2|3|26|32|148)\b|antonov|ilyushin|\bil[- ]?\d|tupolev|\btu[- ]?\d|\byak[- ]?\d/, 'SOVIET_TEAL'],
+    [/\bsu[- ]?\d|sukhoi|\bmig[- ]?\d/, 'SOVIET_FIGHTER'],
+    [/a350|a35k|a359|a351/, 'AIRBUS350'],
+    [/a220|a318|a319|a320|a321|a330|a340|a350|a380|a400|airbus|\bbd-500/, 'AIRBUS'],
+    [/747-?8|777|787|dreamliner/, 'BOEING_WIDE'],
+    [/737-?(100|200)|727|720|707|\bdc-?[89]\b|\bmd-?8\d/, 'BOEING_CLASSIC'],
+    [/757|767/, 'BOEING_TAN'],
+    [/747/, 'BOEING_BROWN'],
+    [/737|boeing|\b7[0-9]7\b/, 'BOEING_NG'],
+    [/\bmd-?11/, 'MD11'],
+    [/\bdc-?10|\bmd-?1[0-9]|\bmd-?9/, 'MD_DC'],
+    [/\bf-?14\b|\bf-?22\b|\bf-?35\b|\bsr-?71\b|\bb-?2\b|rafale|\bf-?117\b|\bf-?4\b|harrier|tornado|gripen|typhoon|eurofighter/, 'MIL_BLACK'],
+    [/\bf-?15\b|\bf-?16\b|f\/a-?18|\bf-?18\b|\ba-?10\b|thunderbolt|mirage|\bhawk\b|\bt-?38\b|\bt-?45\b|\bc-?130\b|\bc-?17\b|\bkc-?\d+|\bb-?52\b|\bb-?1\b/, 'MIL_DARK'],
+    [/helicopter|\baw\d|agusta|\bbell\b|\buh-?\d|\bch-?\d|apache|black ?hawk|robinson|\br22\b|\br44\b|eurocopter|\bec-?\d|osprey|\bv-?22\b|\bmi-?\d/, 'HELI'],
+    [/embraer|\berj|\be1[79]\d|\be-?jet|\bemb-?1[0-9]{2}|phenom|legacy|praetor/, 'EMBRAER'],
+    [/\batr|\bcrj|dash ?8|q400|dhc|saab|fokker|bae ?146|avro|jetstream/, 'REGIONAL_GREY'],
+    [/cirrus|diamond|\bda-?\d|beech|bonanza|king ?air|\btbm|pilatus|\bpc-?12|citation|learjet|gulfstream|challenger/, 'GA_GLASS'],
+    [/cessna|piper|\bc-?1[0-9]{2}\b|\bpa-?\d|cherokee|warrior|archer|seneca|mooney|aeronca|stearman|champ|taylorcraft|\brobin/, 'GA_TAN']
+];
+
+function applyFmcTheme(t) {
+    const v = {
+        '--hb1': shade(t.bg, 0.08), '--hb2': shade(t.bg, -0.35), '--bd': t.bd,
+        '--k1': shade(t.key, 0.18), '--k2': shade(t.key, -0.4), '--k3': shade(t.key, -0.6), '--kt': '#f2f2f2',
+        '--p1': shade(t.pad, 0.1), '--p2': shade(t.pad, -0.25), '--p3': shade(t.pad, -0.4), '--pt': t.pt,
+        '--scr': t.scr, '--sbd': shade(t.bd, -0.3), '--sbd2': shade(t.bg, -0.2), '--lt': shade(t.bg, 0.65),
+        '--tbg': t.bd, '--tbd': t.bg, '--ttx': '#f3f3f3'
+    };
+    Object.keys(v).forEach(function (k) {
+        container.style.setProperty(k, v[k]);
+        tab.style.setProperty(k, v[k]);
+    });
+}
+applyFmcTheme(FTH.DEFAULT);
+
+let curAcId = null;
+function updateAircraftTheme() {
+    try {
+        if (typeof geofs === 'undefined' || !geofs.aircraft || !geofs.aircraft.instance) return;
+        const inst = geofs.aircraft.instance;
+        const id = inst.id;
+        if (id === curAcId) return;
+        curAcId = id;
+        const name = String((inst.aircraftRecord && inst.aircraftRecord.name) || inst.name || '').toLowerCase();
+        let t = FTH.DEFAULT;
+        for (let i = 0; i < FTH_RULES.length; i++) {
+            if (FTH_RULES[i][0].test(name)) { t = FTH[FTH_RULES[i][1]]; break; }
+        }
+        applyFmcTheme(t);
+    } catch (e) {}
+}
+
+// ------------------------------------------------------------------ GeoFS helpers
+function me() {
+    try {
+        const l = geofs.aircraft.instance.llaLocation;
+        if (l && isFinite(l[0]) && isFinite(l[1])) return { lat: l[0], lon: l[1], alt: l[2] * 3.28084 };
+    } catch (e) {}
+    return null;
+}
+function vals() { try { return geofs.animation.values || {}; } catch (e) { return {}; } }
+function gsKt() { const v = vals(); return Number(v.groundSpeedKnt) || Number(v.kias) || 0; }
+function hdgNow() { const v = vals(); return typeof v.heading360 === 'number' ? v.heading360 : null; }
+function acModel() {
+    try {
+        const a = geofs.aircraft.instance;
+        return String((a.aircraftRecord && a.aircraftRecord.name) || a.name || 'UNKNOWN').toUpperCase().slice(0, 14);
+    } catch (e) { return 'UNKNOWN'; }
+}
+const rad = function (d) { return d * Math.PI / 180; };
+function distNm(a, b) {
+    const dLat = rad(b.lat - a.lat), dLon = rad(b.lon - a.lon);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
+    return 2 * 3440.065 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+function brgDeg(a, b) {
+    const dLon = rad(b.lon - a.lon);
+    const y = Math.sin(dLon) * Math.cos(rad(b.lat));
+    const x = Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) - Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(dLon);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+function fmtPos(p) {
+    if (!p) return '-----';
+    function part(v, pos, neg, w) {
+        const a = Math.abs(v), d = Math.floor(a), m = (a - d) * 60;
+        return (v >= 0 ? pos : neg) + String(d).padStart(w, '0') + '°' + m.toFixed(1).padStart(4, '0');
+    }
+    return part(p.lat, 'N', 'S', 2) + ' ' + part(p.lon, 'E', 'W', 3);
+}
+const pad2 = function (n) { return String(n).padStart(2, '0'); };
+function utc(offMin) {
+    const d = new Date(Date.now() + (offMin || 0) * 60000);
+    return pad2(d.getUTCHours()) + pad2(d.getUTCMinutes()) + 'Z';
+}
+function fmtEte(hours) {
+    if (!isFinite(hours) || hours < 0) return '-----';
+    const m = Math.round(hours * 60);
+    return Math.floor(m / 60) + '+' + pad2(m % 60);
+}
+
+// user-made waypoints (type  NAME/lat/lon  in the scratchpad)
+let userFix = {};
+try { userFix = JSON.parse(localStorage.getItem('geofs-fmc-userfix')) || {}; } catch (e) {}
+function saveFix() { try { localStorage.setItem('geofs-fmc-userfix', JSON.stringify(userFix)); } catch (e) {} }
+let wptN = 0;
+const tmpFix = {};      // points that came from a flight plan loaded in GeoFS (not saved)
+const validLL = function (f) { return Math.abs(f.lat) <= 90 && Math.abs(f.lon) <= 180; };
+
+function lookupFix(raw) {
+    const s = String(raw).toUpperCase().trim();
+    let m;
+    if (!s) return null;
+    if (userFix[s]) return userFix[s];
+    if (tmpFix[s]) return tmpFix[s];
+    if ((m = s.match(/^([A-Z0-9]{2,6})\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/))) {
+        const f = { id: m[1], lat: +m[2], lon: +m[3] };
+        if (validLL(f)) { userFix[f.id] = f; saveFix(); return f; }
+        return null;
+    }
+    if ((m = s.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/))) {
+        const f = { id: 'WPT' + pad2(++wptN), lat: +m[1], lon: +m[2] };
+        if (validLL(f)) { userFix[f.id] = f; saveFix(); return f; }
+        return null;
+    }
+    try {
+        const ap = geofs.mainAirportList;
+        if (ap) {
+            if (Array.isArray(ap)) {
+                for (let i = 0; i < ap.length; i++) {
+                    const a = ap[i];
+                    if (Array.isArray(a) && String(a[0]).toUpperCase() === s && isFinite(a[1]) && isFinite(a[2])) return { id: s, lat: +a[1], lon: +a[2] };
+                }
+            } else if (ap[s] && isFinite(ap[s][0]) && isFinite(ap[s][1])) {
+                return { id: s, lat: +ap[s][0], lon: +ap[s][1] };
+            }
+        }
+    } catch (e) {}
+    try {
+        const nv = geofs.nav && geofs.nav.navaids;
+        if (nv) {
+            const list = Array.isArray(nv) ? nv : Object.values(nv);
+            for (let i = 0; i < list.length; i++) {
+                const n = list[i];
+                if (!n) continue;
+                const id = String(n.id || n.ident || n.icao || n.name || '').toUpperCase();
+                const la = Number(n.lat !== undefined ? n.lat : n.latitude), lo = Number(n.lon !== undefined ? n.lon : (n.lng !== undefined ? n.lng : n.longitude));
+                if (id === s && isFinite(la) && isFinite(lo)) return { id: s, lat: la, lon: lo };
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+// ------------------------------------------------------------------ state
+const st = {
+    page: 'MENU', sub: 0, scratch: '', msg: '', exec: false, active: false, na: '',
+    origin: '', dest: '', flt: '', coRte: '', route: [],
+    refApt: '', gate: '', irs: null,
+    dep: { rwy: '', sid: '' }, arr: { star: '', appr: '', rwy: '' },
+    zfw: 0, fuel: 0, resv: 0, ci: '', crz: 0,
+    flaps: 0, v1: 0, vr: 0, v2: 0, derate: 0, appFlaps: 30,
+    clbSpd: 280, crzMach: 0.78, desSpd: 280, fixId: ''
+};
+
+const BOX = '□□□□', DASH = '-----';
+function row(ll, l, rl, r, o) {
+    return Object.assign({ ll: ll || '', l: l || '', rl: rl || '', r: r || '', c: '', lc: '', rc: '', cc: '' }, o || {});
+}
+const blank = function () { return row(); };
+function fill(rows) { while (rows.length < 6) rows.push(blank()); return rows; }
+function err(m) { st.msg = m; }
+function go(p, sub) { st.page = p; st.sub = sub || 0; render(); }
+
+const parseAlt = function (s) {
+    s = String(s).toUpperCase().trim();
+    let m;
+    if ((m = s.match(/^FL(\d{2,3})$/))) return +m[1] * 100;
+    if (/^\d+$/.test(s)) { const n = +s; if (n <= 600) return n * 100; if (n <= 60000) return n; }
+    return null;
+};
+const fmtAlt = function (a) { return !a ? '' : (a >= 18000 ? 'FL' + String(Math.round(a / 100)).padStart(3, '0') : String(a)); };
+const parseWt = function (s) {
+    if (!/^\d+(\.\d+)?$/.test(s)) return null;
+    let n = +s; if (n < 1000) n *= 1000;
+    return (n >= 5000 && n <= 500000) ? Math.round(n) : null;
+};
+const fmtWt = function (w) { return w ? (w / 1000).toFixed(1) : ''; };
+const gwNow = function () { return (st.zfw && st.fuel) ? st.zfw + st.fuel : 0; };
+
+// generic scratchpad field: empty scratch = copy value into scratch, DELETE = clear, else validate + store
+function edit(get, set, val, ex) {
+    return function () {
+        const s = st.scratch;
+        if (!s) { const v = get(); if (v) st.scratch = String(v); return; }
+        if (s === 'DELETE') { set(null); st.scratch = ''; if (ex) st.exec = true; return; }
+        const r = val ? val(s) : s;
+        if (r === null || r === undefined) return err('INVALID ENTRY');
+        set(r); st.scratch = ''; if (ex) st.exec = true;
+    };
+}
+
+// ------------------------------------------------------------------ navigation maths
+function nextIdx() {
+    const R = st.route, p = me();
+    if (!R.length || !p) return 0;
+    let best = 0, bd = Infinity;
+    R.forEach(function (w, i) { const d = distNm(p, w); if (d < bd) { bd = d; best = i; } });
+    return bd < 1.5 ? best + 1 : best;
+}
+function resolveDest() { return st.dest ? lookupFix(st.dest) : null; }
+function progCalc() {
+    const p = me();
+    if (!p) return null;
+    const R = st.route, ni = nextIdx(), dp = resolveDest();
+    let nxt = null, dn = 0, dd = 0;
+    if (R.length && ni < R.length) {
+        nxt = R[ni]; dn = distNm(p, nxt); dd = dn;
+        for (let i = ni; i < R.length - 1; i++) dd += distNm(R[i], R[i + 1]);
+        if (dp) dd += distNm(R[R.length - 1], dp);
+    } else if (dp) {
+        dd = distNm(p, dp);
+    }
+    return { p: p, nxt: nxt, dn: dn, dd: dd, dp: dp };
+}
+
+// ------------------------------------------------------------------ GeoFS flight plan <-> FMC route
+// Reading: a plan loaded in GeoFS (flight plan panel / file) is imported into the FMC route.
+// Writing: EXEC / SYNC LNAV pushes the FMC route into GeoFS's plan (so MCP L NAV can follow it).
+let lastGeoSig = '', fromGeo = false;
+
+function geoPlanArray() {
+    try {
+        const fp = geofs.flightPlan;
+        const a = fp && (fp.waypointArray || fp.waypoints);
+        return Array.isArray(a) ? a : null;
+    } catch (e) { return null; }
+}
+function normGeo(a) {
+    const out = [];
+    a.forEach(function (w) {
+        if (!w) return;
+        const lat = Number(w.lat !== undefined ? w.lat : w.latitude);
+        const lon = Number(w.lon !== undefined ? w.lon : (w.lng !== undefined ? w.lng : w.longitude));
+        if (!isFinite(lat) || !isFinite(lon)) return;
+        const id = String(w.ident || w.id || w.name || w.icao || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+        out.push({ id: id, lat: lat, lon: lon, alt: Number(w.alt) || 0, spd: Number(w.spd) || 0 });
+    });
+    return out;
+}
+const geoSig = function (list) {
+    return list.map(function (w) { return w.id + ':' + w.lat.toFixed(4) + ':' + w.lon.toFixed(4); }).join(';');
+};
+
+function importGeo() {
+    const a = geoPlanArray();
+    if (!a) return false;
+    const list = normGeo(a), sig = geoSig(list);
+    if (sig === lastGeoSig) return false;
+    lastGeoSig = sig;
+    if (!list.length) {                       // plan cleared in GeoFS
+        if (!st.route.length) return false;
+        st.route = []; st.active = false; st.exec = false; fromGeo = false;
+        drawPath(true);
+        return true;
+    }
+    const L = list.slice();
+    let org = null, dst = null;
+    if (L.length > 1 && /^[A-Z]{4}$/.test(L[0].id)) org = L.shift();
+    if (L.length > 1 && /^[A-Z]{4}$/.test(L[L.length - 1].id)) dst = L.pop();
+    if (org) { tmpFix[org.id] = { id: org.id, lat: org.lat, lon: org.lon }; st.origin = org.id; if (!st.refApt) st.refApt = org.id; }
+    if (dst) { tmpFix[dst.id] = { id: dst.id, lat: dst.lat, lon: dst.lon }; st.dest = dst.id; }
+    st.route = L.map(function (w, i) {
+        const r = { id: w.id || ('WPT' + pad2(i + 1)), lat: w.lat, lon: w.lon, via: 'DIRECT' };
+        if (w.alt > 0) r.alt = Math.round(w.alt);
+        if (w.spd > 0) r.spd = Math.round(w.spd);
+        return r;
+    });
+    st.active = true; st.exec = false; fromGeo = true;
+    st.msg = 'ROUTE LOADED FROM GEOFS';
+    drawPath(true);
+    return true;
+}
+
+// push the FMC route into GeoFS's own flight plan (so the MCP L NAV button can follow it) and redraw - best effort
+function syncGeofs() {
+    try {
+        const fp = geofs.flightPlan;
+        const arr = fp && fp.waypointArray;
+        if (!Array.isArray(arr)) { drawPath(true); return false; }
+        arr.length = 0;
+        st.route.forEach(function (w) {
+            arr.push({ lat: w.lat, lon: w.lon, ident: w.id, type: 'FMC', alt: w.alt || undefined, spd: w.spd || undefined });
+        });
+        const dp = resolveDest();
+        if (dp) arr.push({ lat: dp.lat, lon: dp.lon, ident: st.dest, type: 'FMC' });
+        lastGeoSig = geoSig(normGeo(arr));          // so we don't re-import our own plan
+        ['refreshWaypoints', 'updatePath', 'draw', 'refresh', 'update'].forEach(function (fn) {
+            try { if (typeof fp[fn] === 'function') fp[fn](); } catch (e) {}
+        });
+        drawPath(true);
+        return true;
+    } catch (e) { drawPath(true); return false; }
+}
+// set a value on the MCP panel (the MCP script reads geofs.autopilot every 200 ms)
+function toMCP(key, v) {
+    try {
+        const ap = geofs.autopilot;
+        if (!ap) return false;
+        ap[key] = v;
+        if (ap.values) ap.values[key] = v;
+        return true;
+    } catch (e) { return false; }
+}
+
+// ------------------------------------------------------------------ flight path overlay (3D view)
+let pathEnts = [], pathSig = '';
+function cesiumViewer() {
+    try { return (typeof Cesium !== 'undefined' && geofs.api && geofs.api.viewer) || null; } catch (e) { return null; }
+}
+function clearPath() {
+    const v = cesiumViewer();
+    if (v) pathEnts.forEach(function (e) { try { v.entities.remove(e); } catch (x) {} });
+    pathEnts = [];
+}
+function drawPath(force) {
+    const v = cesiumViewer();
+    if (!v) return;
+    const pts = [];
+    const o = st.origin ? lookupFix(st.origin) : null;
+    if (o) pts.push({ id: o.id, lat: o.lat, lon: o.lon });
+    st.route.forEach(function (w) { pts.push({ id: w.id, lat: w.lat, lon: w.lon }); });
+    const d = resolveDest();
+    if (d) pts.push({ id: st.dest, lat: d.lat, lon: d.lon });
+    if (pts.length < 2) { if (pathEnts.length) { clearPath(); } pathSig = ''; return; }
+    const sig = (st.active ? 'A' : 'M') + pts.map(function (p) { return p.id + p.lat + p.lon; }).join(';');
+    if (!force && sig === pathSig) return;
+    pathSig = sig;
+    clearPath();
+    const col = st.active ? Cesium.Color.MAGENTA : Cesium.Color.CYAN;
+    const flat = [];
+    pts.forEach(function (p) { flat.push(p.lon, p.lat); });
+    try {
+        pathEnts.push(v.entities.add({
+            polyline: {
+                positions: Cesium.Cartesian3.fromDegreesArray(flat),
+                width: 4,
+                clampToGround: true,
+                material: col.withAlpha(0.9)
+            }
+        }));
+    } catch (e) { console.warn('[GeoFS FMC] path line failed', e); }
+    pts.forEach(function (p) {
+        try {
+            pathEnts.push(v.entities.add({
+                position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
+                point: { pixelSize: 8, color: col, heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                         disableDepthTestDistance: Number.POSITIVE_INFINITY },
+                label: {
+                    text: p.id, font: '13px monospace', fillColor: Cesium.Color.WHITE,
+                    outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                    pixelOffset: new Cesium.Cartesian2(0, -16), heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+                    disableDepthTestDistance: Number.POSITIVE_INFINITY
+                }
+            }));
+        } catch (e) { console.warn('[GeoFS FMC] path point failed', e); }
+    });
+}
+
+// ------------------------------------------------------------------ approx performance
+function calcV() {
+    const gw = gwNow();
+    if (!gw) { err('ENTER ZFW & FUEL'); return false; }
+    if (!st.flaps) { err('ENTER FLAPS'); return false; }
+    const t = gw / 1000;
+    let v2 = 132 + (t - 60) * 1.15;
+    v2 += ({ 1: 4, 5: 0, 10: -2, 15: -4, 25: -8 })[st.flaps] || 0;
+    v2 = Math.round(v2);
+    st.v2 = v2; st.vr = v2 - 4; st.v1 = v2 - 5;
+    return true;
+}
+function vref(flap) {
+    const gw = gwNow() || 60000;
+    const t = gw / 1000;
+    return Math.round(125 + (t - 50) * 1.2 + ({ 15: 10, 30: 0, 40: -5 })[flap]);
+}
+
+// ------------------------------------------------------------------ pushback bridge
+const PB_P = '#y-pushback-panel [data-act="', PB_L = '#y-pushback-launcher [data-act="';
+function pbState() {
+    const present = !!$('y-pushback-launcher');
+    const panel = $('y-pushback-panel');
+    const vis = function (id) { const e = $(id); return !!(e && panel && panel.style.display !== 'none' && e.style.display !== 'none'); };
+    return { present: present, sel: vis('y-pb-setup'), run: vis('y-pb-run') };
+}
+function pb(sel) {
+    const b = document.querySelector(sel);
+    if (b && !b.disabled) { b.click(); } else err('PUSHBACK NOT READY');
+}
+const pbAct = function (a) { return function () { pb(PB_P + a + '"]'); }; };
+function pbKey(key, shift) {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: key, shiftKey: !!shift, bubbles: true, cancelable: true }));
+}
+const txt = function (id) { const e = $(id); return e ? e.textContent.trim() : ''; };
+
+// ------------------------------------------------------------------ PAGES
+const PAGES = {};
+
+PAGES.MENU = function () {
+    return {
+        title: 'MENU', rows: fill([
+            row('', '<FMC', '', 'REQUEST', { rc: 'a' }),
+            row('', '<ACARS'),
+            row('', '<PUSHBACK')
+        ]),
+        L: [function () { go('IDENT'); }, function () { err('ACARS NOT AVAILABLE'); }, function () { go('PUSHBACK'); }], R: []
+    };
+};
+
+PAGES.IDENT = function () {
+    return {
+        title: 'IDENT', rows: fill([
+            row('MODEL', acModel(), 'ENG RATING', '26K'),
+            row('NAV DATA', 'GEOFS DB', 'ACTIVE', 'BUILT-IN'),
+            blank(),
+            row('OP PROGRAM', 'FMC-MCP 1.2'),
+            blank(),
+            row('', '<INDEX', '', 'POS INIT>')
+        ]),
+        L: [, , , , , function () { go('INDEX'); }], R: [, , , , , function () { go('POSINIT'); }]
+    };
+};
+
+PAGES.INDEX = function () {
+    return {
+        title: 'INIT/REF INDEX', rows: fill([
+            row('', '<IDENT', '', 'NAV DATA>'),
+            row('', '<POS'),
+            row('', '<PERF'),
+            row('', '<TAKEOFF'),
+            row('', '<APPROACH'),
+            row('', '<MENU')
+        ]),
+        L: [function () { go('IDENT'); }, function () { go('POSINIT'); }, function () { go('PERF'); },
+            function () { go('TAKEOFF'); }, function () { go('APPREF'); }, function () { go('MENU'); }],
+        R: [function () { go('FIX'); }]
+    };
+};
+
+PAGES.POSINIT = function () {
+    const p = me();
+    return {
+        title: 'POS INIT', rows: fill([
+            row('LAST POS', fmtPos(p), '', '', { lc: 'g' }),
+            row('REF AIRPORT', st.refApt || BOX, 'GMT', utc(), { rc: 'g' }),
+            row('GATE', st.gate || DASH),
+            row('SET IRS POS', st.irs ? fmtPos(st.irs) : '□□□°□□.□ □□□°□□.□', 'IRS', st.irs ? 'ALIGNED' : 'NOT SET', { rc: st.irs ? 'g' : 'a' }),
+            row('GPS POS', fmtPos(p), '', '', { lc: 'g' }),
+            row('', '<INDEX', '', 'ROUTE>')
+        ]),
+        L: [
+            function () { if (!st.scratch && p) st.scratch = p.lat.toFixed(4) + '/' + p.lon.toFixed(4); },
+            edit(function () { return st.refApt; }, function (v) { st.refApt = v || ''; if (v && !st.origin) st.origin = v; },
+                function (s) { return /^[A-Z]{4}$/.test(s) ? s : null; }),
+            edit(function () { return st.gate; }, function (v) { st.gate = v || ''; }, function (s) { return /^[A-Z0-9]{1,5}$/.test(s) ? s : null; }),
+            function () {
+                const s = st.scratch;
+                if (!s) { if (p) st.scratch = p.lat.toFixed(4) + '/' + p.lon.toFixed(4); return; }
+                if (s === 'DELETE') { st.irs = null; st.scratch = ''; return; }
+                const m = s.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/);
+                if (!m || !validLL({ lat: +m[1], lon: +m[2] })) return err('INVALID ENTRY');
+                st.irs = { lat: +m[1], lon: +m[2] }; st.scratch = '';
+            },
+            function () { if (!st.scratch && p) st.scratch = p.lat.toFixed(4) + '/' + p.lon.toFixed(4); },
+            function () { go('INDEX'); }
+        ],
+        R: [, , , , , function () { go('RTE'); }]
+    };
+};
+
+PAGES.RTE = function () {
+    const n = Math.ceil((st.route.length + 1) / 5);
+    const pages = 1 + Math.max(1, n);
+    if (st.sub >= pages) st.sub = pages - 1;
+    const title = (st.active ? 'ACT ' : '') + 'RTE 1';
+    const L = [], R = [];
+    let rows;
+    if (st.sub === 0) {
+        rows = fill([
+            row('ORIGIN', st.origin || BOX, 'DEST', st.dest || BOX, { lc: 'g', rc: 'g' }),
+            row('FLT NO', st.flt || DASH, 'CO ROUTE', st.coRte || DASH),
+            blank(), blank(), blank(),
+            row('', '<INDEX', '', st.active ? 'LEGS>' : 'ACTIVATE>', { rc: st.active ? '' : 'g' })
+        ]);
+        const icao = function (s) { return /^[A-Z]{4}$/.test(s) ? s : null; };
+        L[0] = edit(function () { return st.origin; }, function (v) { st.origin = v || ''; }, icao, true);
+        R[0] = edit(function () { return st.dest; }, function (v) { st.dest = v || ''; }, icao, true);
+        L[1] = edit(function () { return st.flt; }, function (v) { st.flt = v || ''; }, function (s) { return /^[A-Z0-9]{1,8}$/.test(s) ? s : null; });
+        R[1] = edit(function () { return st.coRte; }, function (v) { st.coRte = v || ''; }, function (s) { return /^[A-Z0-9]{1,10}$/.test(s) ? s : null; });
+        L[5] = function () { go('INDEX'); };
+        R[5] = function () { if (st.active) go('LEGS'); else st.exec = true; };
+    } else {
+        const base = (st.sub - 1) * 5;
+        rows = [];
+        for (let i = 0; i < 5; i++) {
+            (function (i) {
+                const idx = base + i, w = st.route[idx];
+                if (w) rows.push(row('VIA', w.via || 'DIRECT', 'TO', w.id, { rc: 'g' }));
+                else if (idx === st.route.length) rows.push(row('VIA', DASH, 'TO', DASH));
+                else rows.push(blank());
+                if (w) L[i] = edit(function () { return w.via || 'DIRECT'; }, function (v) { w.via = v || 'DIRECT'; },
+                    function (s) { return /^[A-Z0-9]{1,6}$/.test(s) ? s : null; }, true);
+                R[i] = function () {
+                    const s = st.scratch;
+                    if (!s) { if (w) st.scratch = w.id; return; }
+                    if (s === 'DELETE') { if (w) { st.route.splice(idx, 1); st.scratch = ''; st.exec = true; } return; }
+                    if (!w && idx !== st.route.length) return;
+                    const f = lookupFix(s);
+                    if (!f) return err('NOT IN DATA BASE');
+                    if (w) { w.id = f.id; w.lat = f.lat; w.lon = f.lon; }
+                    else st.route.push({ id: f.id, lat: f.lat, lon: f.lon, via: 'DIRECT' });
+                    st.scratch = ''; st.exec = true;
+                };
+            })(i);
+        }
+        rows.push(row('', '<INDEX', '', st.active ? 'LEGS>' : 'ACTIVATE>', { rc: st.active ? '' : 'g' }));
+        L[5] = function () { go('INDEX'); };
+        R[5] = function () { if (st.active) go('LEGS'); else st.exec = true; };
+    }
+    return { title: title, pages: pages, rows: rows, L: L, R: R };
+};
+
+PAGES.DEPARR = function () {
+    return {
+        title: 'DEP/ARR INDEX', rows: fill([
+            row(st.origin || '----', '<DEP', st.dest || '----', 'ARR>'),
+            blank(), blank(), blank(), blank(),
+            row('', '<RTE', '', '')
+        ]),
+        L: [function () { go('DEP'); }, , , , , function () { go('RTE'); }],
+        R: [function () { go('ARR'); }]
+    };
+};
+
+PAGES.DEP = function () {
+    return {
+        title: (st.origin || '----') + ' DEPARTURES', rows: fill([
+            row('RUNWAY', st.dep.rwy || BOX, 'SID', st.dep.sid || DASH, { lc: 'g', rc: 'g' }),
+            blank(), blank(), blank(), blank(),
+            row('', '<INDEX', '', 'ROUTE>')
+        ]),
+        L: [edit(function () { return st.dep.rwy; }, function (v) { st.dep.rwy = v || ''; }, function (s) { return /^\d{2}[LRC]?$/.test(s) ? s : null; }, true),
+            , , , , function () { go('DEPARR'); }],
+        R: [edit(function () { return st.dep.sid; }, function (v) { st.dep.sid = v || ''; }, function (s) { return /^[A-Z0-9]{3,8}$/.test(s) ? s : null; }, true),
+            , , , , function () { go('RTE'); }]
+    };
+};
+
+PAGES.ARR = function () {
+    return {
+        title: (st.dest || '----') + ' ARRIVALS', rows: fill([
+            row('STAR', st.arr.star || DASH, 'APPROACH', st.arr.appr || DASH, { lc: 'g', rc: 'g' }),
+            row('RUNWAY', st.arr.rwy || BOX, '', '', { lc: 'g' }),
+            blank(), blank(), blank(),
+            row('', '<INDEX', '', 'ROUTE>')
+        ]),
+        L: [edit(function () { return st.arr.star; }, function (v) { st.arr.star = v || ''; }, function (s) { return /^[A-Z0-9]{3,8}$/.test(s) ? s : null; }, true),
+            edit(function () { return st.arr.rwy; }, function (v) { st.arr.rwy = v || ''; }, function (s) { return /^\d{2}[LRC]?$/.test(s) ? s : null; }, true),
+            , , , function () { go('DEPARR'); }],
+        R: [edit(function () { return st.arr.appr; }, function (v) { st.arr.appr = v || ''; }, function (s) { return /^[A-Z0-9]{3,8}$/.test(s) ? s : null; }, true),
+            , , , , function () { go('RTE'); }]
+    };
+};
+
+PAGES.LEGS = function () {
+    const R = st.route, pages = Math.max(1, Math.ceil((R.length + 1) / 5));
+    if (st.sub >= pages) st.sub = pages - 1;
+    const base = st.sub * 5, p = me(), ni = nextIdx();
+    const rows = [], L = [], Rr = [];
+    for (let i = 0; i < 5; i++) {
+        (function (i) {
+            const idx = base + i, w = R[idx];
+            if (!w && idx !== R.length) { rows.push(blank()); return; }
+            let ll = '', l = DASH, r = '', rc = '';
+            if (w) {
+                const prev = idx > 0 ? R[idx - 1] : p;
+                if (prev) ll = String(Math.round(brgDeg(prev, w)) % 360).padStart(3, '0') + '° ' + Math.round(distNm(prev, w)) + 'NM';
+                l = w.id;
+                r = (w.spd || '---') + '/' + (w.alt ? fmtAlt(w.alt) : '-----');
+                rc = (w.spd || w.alt) ? 'g' : '';
+            }
+            rows.push(row(ll, l, w ? 'SPD/ALT' : '', r, { lc: (w && idx === ni) ? 'm' : '', rc: rc }));
+            L[i] = function () {
+                const s = st.scratch;
+                if (!s) { if (w) st.scratch = w.id; return; }
+                if (s === 'DELETE') { if (w) { R.splice(idx, 1); st.scratch = ''; st.exec = true; } return; }
+                const f = lookupFix(s);
+                if (!f) return err('NOT IN DATA BASE');
+                const j = R.findIndex(function (x, k) { return k > idx && x.id === f.id; });
+                if (j > 0) R.splice(idx, j - idx);                          // direct-to: skip the legs in between
+                else R.splice(idx, 0, { id: f.id, lat: f.lat, lon: f.lon, via: 'DIRECT' });
+                st.scratch = ''; st.exec = true;
+            };
+            if (w) Rr[i] = function () {
+                const s = st.scratch;
+                if (!s) return;
+                if (s === 'DELETE') { delete w.spd; delete w.alt; st.scratch = ''; return; }
+                let a = '', b = '';
+                if (s.indexOf('/') >= 0) { const q = s.split('/'); a = q[0]; b = q[1] || ''; }
+                else if (/^\d{3}$/.test(s)) a = s; else b = s;
+                if (a && !/^\d{3}$/.test(a)) return err('INVALID ENTRY');
+                let alt = 0;
+                if (b) { alt = parseAlt(b); if (alt === null) return err('INVALID ENTRY'); }
+                if (a) w.spd = +a;
+                if (b) w.alt = alt;
+                st.scratch = ''; st.exec = true;
+            };
+        })(i);
+    }
+    rows.push(row('', '<RTE', '', 'SYNC LNAV>', { rc: 'g' }));
+    L[5] = function () { go('RTE'); };
+    Rr[5] = function () { err(syncGeofs() ? 'SENT TO GEOFS PLAN' : 'GEOFS PLAN NOT AVAILABLE'); };
+    return { title: (st.active ? 'ACT ' : 'MOD ') + 'RTE 1 LEGS', pages: pages, rows: rows, L: L, R: Rr };
+};
+
+PAGES.PROG = function () {
+    const c = progCalc(), gs = gsKt(), v = vals();
+    const ete = function (d) { return (gs > 30 && isFinite(d)) ? d / gs : NaN; };
+    const eta = function (d) { return (gs > 30 && isFinite(d)) ? utc(d / gs * 60) : '-----'; };
+    const alt = me() ? Math.round(me().alt) : 0;
+    const h = hdgNow();
+    return {
+        title: 'PROGRESS', rows: fill([
+            row('NEXT WPT', c && c.nxt ? c.nxt.id : DASH, 'DTG', c && c.nxt ? Math.round(c.dn) + 'NM' : DASH, { lc: 'm' }),
+            row('ETE', c && c.nxt ? fmtEte(ete(c.dn)) : DASH, 'ETA', c && c.nxt ? eta(c.dn) : DASH),
+            row('DEST', st.dest || DASH, 'DTG', c && c.dd ? Math.round(c.dd) + 'NM' : DASH, { lc: 'g' }),
+            row('ETE', c && c.dd ? fmtEte(ete(c.dd)) : DASH, 'ETA', c && c.dd ? eta(c.dd) : DASH),
+            row('ALT', alt ? alt + 'FT' : DASH, 'GS', Math.round(gs) + 'KT'),
+            row('HDG', h !== null ? String(Math.round(h) % 360).padStart(3, '0') + '°' : DASH, 'KIAS', Math.round(Number(v.kias) || 0) + 'KT')
+        ]),
+        L: [], R: []
+    };
+};
+
+PAGES.PERF = function () {
+    const gw = gwNow();
+    const wt = function (key) {
+        return edit(function () { return fmtWt(st[key]); }, function (v) { st[key] = v || 0; }, parseWt);
+    };
+    return {
+        title: 'PERF INIT', rows: fill([
+            row('GR WT', gw ? fmtWt(gw) : DASH, 'CRZ ALT', st.crz ? fmtAlt(st.crz) : BOX, { rc: 'g' }),
+            row('FUEL', st.fuel ? fmtWt(st.fuel) : BOX),
+            row('ZFW', st.zfw ? fmtWt(st.zfw) : BOX),
+            row('RESERVES', st.resv ? fmtWt(st.resv) : DASH),
+            row('COST INDEX', st.ci || BOX, '', '', { lc: 'g' }),
+            row('', '<INDEX', '', 'THRUST LIM>')
+        ]),
+        L: [, wt('fuel'), wt('zfw'), wt('resv'),
+            edit(function () { return st.ci; }, function (v) { st.ci = v || ''; }, function (s) { return (/^\d{1,3}$/.test(s)) ? s : null; }),
+            function () { go('INDEX'); }],
+        R: [edit(function () { return st.crz ? fmtAlt(st.crz) : ''; }, function (v) { st.crz = v || 0; }, parseAlt),
+            , , , , function () { go('N1'); }]
+    };
+};
+
+PAGES.TAKEOFF = function () {
+    const gw = gwNow();
+    const vfld = function (key) {
+        return function () {
+            const s = st.scratch;
+            if (!s) { if (!st[key]) { if (calcV()) err('V-SPEEDS CALCULATED'); } else st.scratch = String(st[key]); return; }
+            if (s === 'DELETE') { st[key] = 0; st.scratch = ''; return; }
+            if (!/^\d{2,3}$/.test(s)) return err('INVALID ENTRY');
+            st[key] = +s; st.scratch = '';
+        };
+    };
+    return {
+        title: 'TAKEOFF REF', rows: fill([
+            row('FLAPS', st.flaps ? st.flaps + '°' : BOX, 'V1', st.v1 || BOX, { lc: 'g', rc: 'g' }),
+            row('THRUST', ['TO', 'TO-1', 'TO-2'][st.derate], 'VR', st.vr || BOX, { rc: 'g' }),
+            row('GR WT', gw ? fmtWt(gw) : DASH, 'V2', st.v2 || BOX, { rc: 'g' }),
+            row('RUNWAY', st.dep.rwy || DASH),
+            row('', '', '', '', { c: 'V-SPEEDS ARE APPROX.', cc: 'a' }),
+            row('', '<INDEX', '', 'V2 > MCP')
+        ]),
+        L: [edit(function () { return st.flaps || ''; }, function (v) { st.flaps = v || 0; },
+                function (s) { return [1, 5, 10, 15, 25].indexOf(+s) >= 0 ? +s : null; }),
+            function () { go('N1'); }, , , , function () { go('INDEX'); }],
+        R: [vfld('v1'), vfld('vr'), vfld('v2'), , ,
+            function () { if (!st.v2) return err('NO V2 SET'); err(toMCP('speed', st.v2) ? 'V2 SET ON MCP' : 'MCP NOT AVAILABLE'); }]
+    };
+};
+
+PAGES.APPREF = function () {
+    const gw = gwNow();
+    const fr = function (f) {
+        return [row('', '<' + f + '°', 'VREF', String(vref(f)), { lc: st.appFlaps === f ? 'g' : '', rc: st.appFlaps === f ? 'g' : '' }), function () { st.appFlaps = f; }];
+    };
+    const a = fr(15), b = fr(30), c = fr(40);
+    return {
+        title: 'APPROACH REF', rows: fill([
+            row('GR WT', gw ? fmtWt(gw) : DASH, '', '', {}),
+            a[0], b[0], c[0],
+            row('', '', '', '', { c: 'VREF IS APPROX.', cc: 'a' }),
+            row('', '<INDEX', '', '')
+        ]),
+        L: [, a[1], b[1], c[1], , function () { go('INDEX'); }], R: []
+    };
+};
+
+PAGES.N1 = function () {
+    const sel = function (i) { return function () { st.derate = i; }; };
+    return {
+        title: 'THRUST LIM', rows: fill([
+            row('', '<TO', '', '26K', { lc: st.derate === 0 ? 'g' : '' }),
+            row('', '<TO-1', '', '24K', { lc: st.derate === 1 ? 'g' : '' }),
+            row('', '<TO-2', '', '22K', { lc: st.derate === 2 ? 'g' : '' }),
+            blank(), blank(),
+            row('', '<INDEX', '', 'TAKEOFF>')
+        ]),
+        L: [sel(0), sel(1), sel(2), , , function () { go('INDEX'); }], R: [, , , , , function () { go('TAKEOFF'); }]
+    };
+};
+
+PAGES.VNAV = function () {
+    const c = progCalc(), p = me();
+    let td = DASH;
+    if (c && c.dd && p) {
+        const tod = Math.max(0, (p.alt - 1500) / 1000 * 3);
+        td = Math.max(0, Math.round(c.dd - tod)) + 'NM';
+    }
+    const numf = function (key, lo, hi) {
+        return edit(function () { return st[key]; }, function (v) { if (v !== null) st[key] = v; },
+            function (s) { return (/^\d{3}$/.test(s) && +s >= lo && +s <= hi) ? +s : null; });
+    };
+    return {
+        title: 'VNAV', rows: fill([
+            row('CRZ ALT', st.crz ? fmtAlt(st.crz) : BOX, 'TRANS ALT', '18000', { lc: 'g' }),
+            row('CLB SPD', st.clbSpd + 'KT', 'CRZ MACH', '.' + String(Math.round(st.crzMach * 100)).padStart(2, '0'), { lc: 'g', rc: 'g' }),
+            row('DES SPD', st.desSpd + 'KT', 'COST INDEX', st.ci || DASH, { lc: 'g' }),
+            row('T/D IN', td),
+            blank(),
+            row('', '<INDEX', '', 'CRZ > MCP')
+        ]),
+        L: [edit(function () { return st.crz ? fmtAlt(st.crz) : ''; }, function (v) { st.crz = v || 0; }, parseAlt),
+            numf('clbSpd', 150, 340), numf('desSpd', 150, 340), , , function () { go('INDEX'); }],
+        R: [, edit(function () { return String(Math.round(st.crzMach * 100)); }, function (v) { if (v !== null) st.crzMach = v / 100; },
+                function (s) { const n = s.replace(/^\./, ''); return (/^\d{2}$/.test(n) && +n >= 50 && +n <= 92) ? +n : null; }),
+            , , ,
+            function () { if (!st.crz) return err('NO CRZ ALT SET'); err(toMCP('altitude', st.crz) ? 'CRZ ALT SET ON MCP' : 'MCP NOT AVAILABLE'); }]
+    };
+};
+
+PAGES.FIX = function () {
+    const f = st.fixId ? lookupFix(st.fixId) : null, p = me();
+    let info = DASH;
+    if (f && p) info = String(Math.round(brgDeg(p, f)) % 360).padStart(3, '0') + '°/' + Math.round(distNm(p, f)) + 'NM';
+    return {
+        title: 'FIX INFO', rows: fill([
+            row('FIX', st.fixId || BOX, '', '', { lc: 'g' }),
+            row('BRG/DIST FROM PPOS', info),
+            row('POSITION', f ? fmtPos(f) : DASH),
+            blank(), blank(),
+            row('', '<INDEX')
+        ]),
+        L: [function () {
+            const s = st.scratch;
+            if (!s) { if (st.fixId) st.scratch = st.fixId; return; }
+            if (s === 'DELETE') { st.fixId = ''; st.scratch = ''; return; }
+            const q = lookupFix(s);
+            if (!q) return err('NOT IN DATA BASE');
+            st.fixId = q.id; st.scratch = '';
+        }, , , , , function () { go('INDEX'); }], R: []
+    };
+};
+
+PAGES.NA = function () {
+    return {
+        title: st.na || '', rows: fill([blank(), blank(), row('', '', '', '', { c: 'NOT AVAILABLE', cc: 'a' }),
+            row('', '', '', '', { c: 'IN THIS FMC', cc: 'a' }), blank(), row('', '<MENU')]),
+        L: [, , , , , function () { go('MENU'); }], R: []
+    };
+};
+
+PAGES.PUSHBACK = function () {
+    const s = pbState();
+    const menu = function () { go('MENU'); };
+    if (!s.present) {
+        return {
+            title: 'PUSHBACK', rows: fill([blank(), blank(),
+                row('', '', '', '', { c: 'PUSHBACK SCRIPT', cc: 'a' }), row('', '', '', '', { c: 'NOT INSTALLED', cc: 'a' }),
+                blank(), row('', '<MENU')]),
+            L: [, , , , , menu], R: []
+        };
+    }
+    if (s.run) {
+        return {
+            title: 'PUSHBACK ACTIVE', rows: fill([
+                row('', '<STOP', '', '', { lc: 'r' }),
+                row('', '<NEXT CAM', '', 'PREV CAM>'),
+                row('SPEED ' + txt('y-pb-speed-val'), '<SLOWER', '', 'FASTER>'),
+                row('MODE', '<' + (/non/i.test(txt('y-pb-nonstop-btn')) ? 'NONSTOP' : 'STOPS'), 'WAIT ' + txt('y-pb-wait-val'), 'WAIT +>'),
+                row('', '', '', 'WAIT ->'),
+                row('', '<MENU')
+            ]),
+            L: [pbAct('stop'), function () { pbKey('v', false); }, pbAct('spdD'), pbAct('nonstop'), , menu],
+            R: [, function () { pbKey('v', true); }, pbAct('spdU'), pbAct('waitU'), pbAct('waitD')]
+        };
+    }
+    if (s.sel) {
+        return {
+            title: 'PUSHBACK PLAN', rows: fill([
+                row('', '<READY / START', '', 'CANCEL>', { lc: 'g' }),
+                row('', '<UNDO STOP', '', 'CLEAR ALL>'),
+                row('', '<STRAIGHT ' + (/ON/.test(txt('y-pb-straight-btn')) ? 'ON' : 'OFF'), '', 'SAVE PLAN>'),
+                row('SPEED ' + txt('y-pb-speed-val'), '<SLOWER', '', 'FASTER>'),
+                row('MODE', '<' + (/non/i.test(txt('y-pb-nonstop-btn')) ? 'NONSTOP' : 'STOPS'), 'WAIT ' + txt('y-pb-wait-val'), 'WAIT +>'),
+                row('', '<MENU', '', 'WAIT ->')
+            ]),
+            L: [pbAct('ready'), pbAct('undo'), pbAct('straight'), pbAct('spdD'), pbAct('nonstop'), menu],
+            R: [pbAct('cancel'), pbAct('clear'), pbAct('savePlan'), pbAct('spdU'), pbAct('waitU'), pbAct('waitD')]
+        };
+    }
+    return {
+        title: 'PUSHBACK', rows: fill([
+            row('', '<PUSH BACK', '', '', { lc: 'g' }),
+            row('', '<PULL FORWARD', '', '', { lc: 'g' }),
+            row('', '<SAVED PLANS'),
+            blank(), blank(),
+            row('', '<MENU')
+        ]),
+        L: [function () { pb(PB_L + 'push"]'); }, function () { pb(PB_L + 'pull"]'); }, function () { pb(PB_L + 'saved"]'); }, , , menu], R: []
+    };
+};
+
+// ------------------------------------------------------------------ rendering
+const esc = function (s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); };
+const sp = function (t, c) { return '<span' + (c ? ' class="' + c + '"' : '') + '>' + esc(t) + '</span>'; };
+let curDef = null;
+
+function render() {
+    const mk = PAGES[st.page] || PAGES.MENU;
+    const def = mk();
+    curDef = def;
+    const pg = (def.pages && def.pages > 1) ? (st.sub + 1) + '/' + def.pages : '';
+    let h = '<div class="ttl">' + esc(def.title) + (pg ? '<i>' + pg + '</i>' : '') + '</div>';
+    def.rows.forEach(function (r) {
+        h += '<div class="lb">' + sp(r.ll) + sp('') + sp(r.rl) + '</div>';
+        h += '<div class="dt">' + sp(r.l, r.lc) + sp(r.c, r.cc) + sp(r.r, r.rc) + '</div>';
+    });
+    h += '<div class="scr' + (st.msg ? ' a' : '') + '">' + esc(st.msg || st.scratch) + '</div>';
+    screen.innerHTML = h;
+    const lamp = $('fmc-exec-lamp');
+    if (lamp && lamp.parentNode) lamp.parentNode.classList.toggle('on', !!st.exec);
+    drawPath();
+}
+
+// ------------------------------------------------------------------ input
+function press(k) {
+    if (st.msg) { st.msg = ''; if (k === 'CLR') { render(); return; } }
+    switch (k) {
+        case 'INITREF': go(st.page === 'INDEX' ? 'IDENT' : (['IDENT', 'POSINIT', 'PERF', 'TAKEOFF', 'APPREF'].indexOf(st.page) >= 0 ? 'INDEX' : 'IDENT')); return;
+        case 'RTE': go('RTE'); return;
+        case 'DEPARR': go('DEPARR'); return;
+        case 'VNAV': go('VNAV'); return;
+        case 'FIX': go('FIX'); return;
+        case 'LEGS': go('LEGS'); return;
+        case 'PROG': go('PROG'); return;
+        case 'MENU': go('MENU'); return;
+        case 'N1': go('N1'); return;
+        case 'ATC': st.na = 'ATC'; go('NA'); return;
+        case 'HOLD': st.na = 'HOLD'; go('NA'); return;
+        case 'COMM': st.na = 'FMC COMM'; go('NA'); return;
+        case 'EXEC':
+            if (st.exec) {
+                st.exec = false;
+                st.active = true;
+                if (st.route.length) syncGeofs();
+            }
+            render(); return;
+        case 'PREV':
+        case 'NEXT': {
+            const n = (curDef && curDef.pages) || 1;
+            if (n > 1) st.sub = (st.sub + (k === 'NEXT' ? 1 : -1) + n) % n;
+            render(); return;
+        }
+        case 'SP': if (st.scratch.length < 24) st.scratch += ' '; render(); return;
+        case 'DEL': st.scratch = 'DELETE'; render(); return;
+        case 'CLR': st.scratch = st.scratch === 'DELETE' ? '' : st.scratch.slice(0, -1); render(); return;
+        case '+/-': {
+            const last = st.scratch.slice(-1);
+            if (last === '-') st.scratch = st.scratch.slice(0, -1) + '+';
+            else if (last === '+') st.scratch = st.scratch.slice(0, -1) + '-';
+            else if (st.scratch.length < 24) st.scratch += '-';
+            render(); return;
+        }
+        default:
+            if (st.scratch === 'DELETE') st.scratch = '';
+            if (st.scratch.length < 24) st.scratch += k;
+            render();
+    }
+}
+
+function pressLSK(side, i) {
+    if (st.msg) st.msg = '';
+    const f = curDef && curDef[side] && curDef[side][i];
+    if (typeof f === 'function') f();
+    render();
+}
+
+let clrTimer = null;
+let drag = null;
+container.addEventListener('mousedown', function (e) {
+    const k = e.target.closest('.fmc-k'), l = e.target.closest('.fmc-lsk');
+    if (k) {
+        e.stopPropagation(); e.preventDefault();
+        const key = k.dataset.k;
+        press(key);
+        if (key === 'CLR') clrTimer = setTimeout(function () { st.scratch = ''; st.msg = ''; render(); }, 600);
+        return;
+    }
+    if (l) { e.stopPropagation(); e.preventDefault(); pressLSK(l.dataset.s, +l.dataset.i); return; }
+    if (e.target.closest('#fmc-screen')) { e.preventDefault(); return; }
+    // drag the unit by its housing
+    drag = { x: e.clientX - container.offsetLeft, y: e.clientY - container.offsetTop };
+    e.preventDefault();
+});
+window.addEventListener('mouseup', function () {
+    if (clrTimer) { clearTimeout(clrTimer); clrTimer = null; }
+    drag = null;
+});
+window.addEventListener('mousemove', function (e) {
+    if (!drag) return;
+    container.style.left = (e.clientX - drag.x) + 'px';
+    container.style.top = (e.clientY - drag.y) + 'px';
+});
+container.addEventListener('wheel', function (e) {
+    if (!e.altKey) return;
+    scale = Math.min(1.8, Math.max(0.5, scale + (e.deltaY < 0 ? 0.05 : -0.05)));
+    applyScale();
+    e.preventDefault();
+}, { passive: false });
+
+// physical keyboard while the mouse is over the FMC
+let hover = false;
+container.addEventListener('mouseenter', function () { hover = true; });
+container.addEventListener('mouseleave', function () { hover = false; });
+window.addEventListener('keydown', function (e) {
+    if (!hover || container.style.display !== 'block') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    let out = null;
+    if (/^[a-zA-Z0-9.\/]$/.test(k)) out = k.toUpperCase();
+    else if (k === ' ') out = 'SP';
+    else if (k === 'Backspace') out = 'CLR';
+    else if (k === 'Delete') out = 'DEL';
+    else if (k === '-' || k === '+') out = '+/-';
+    else if (k === 'PageDown') out = 'NEXT';
+    else if (k === 'PageUp') out = 'PREV';
+    else if (k === 'Enter') out = 'EXEC';
+    if (!out) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    press(out);
+}, true);
+
+// live pages refresh themselves; the flight plan is imported and the path overlay kept in sync even when the FMC is hidden
+setInterval(function () {
+    updateAircraftTheme();
+    const imported = importGeo();
+    drawPath();
+    if (container.style.display !== 'block') return;
+    if (imported || ['PROG', 'LEGS', 'POSINIT', 'PUSHBACK', 'VNAV', 'FIX'].indexOf(st.page) >= 0) render();
+}, 500);
+
+render();
+console.log('[GeoFS FMC] ready');
+})();
