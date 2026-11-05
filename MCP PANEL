@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MCP PANEL
 // @namespace    http://tampermonkey.net/
-// @version      5.1
-// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft. Tu-144 radar (РЛС) mode now shows Immersive Airports ground data (runways, taxiways, aprons, stands) and multiplayer traffic.
+// @version      5.2
+// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft. Tu-144 radar (РЛС) mode shows Immersive Airports ground data and multiplayer traffic. Button docks in the GeoFS bottom bar. Tu-144 КУРС selector drives the heading drum and map ring.
 // @match        https://*.geo-fs.com/geofs.php*
 // @grant        none
 // ==/UserScript==
@@ -270,11 +270,12 @@
     .rbtn.on{border-color:#5dff6a;box-shadow:inset 0 0 6px #000,0 0 7px #5dff6a}
     .inop{opacity:.42;filter:saturate(.3) brightness(.8);cursor:not-allowed}
     .inop:active{transform:none}
-    .mcp-toggle-tab{position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:999998;
-        --bg:#575b5f;--border:#26282a;--txt:#f3f3f3;
-        background:var(--border);color:var(--txt);border:2px solid var(--bg);border-bottom:none;padding:6px 20px;
-        border-radius:6px 6px 0 0;cursor:pointer;font-family:monospace;font-weight:bold;font-size:12px;
-        box-shadow:0 -4px 10px rgba(0,0,0,.5);transition:background .4s,border-color .4s}
+    .mcp-toggle-tab{--bg:#575b5f;--border:#26282a;--txt:#f3f3f3;
+        background:var(--border);color:var(--txt);border:1px solid var(--bg);padding:0 14px;margin:0 3px;
+        border-radius:4px;cursor:pointer;font-family:monospace;font-weight:bold;font-size:12px;
+        height:30px;line-height:28px;min-width:0;text-transform:none;vertical-align:middle;transition:background .4s,border-color .4s}
+    .mcp-toggle-tab.floating{position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:999998;
+        height:auto;line-height:normal;padding:6px 20px;border-radius:6px 6px 0 0;border-bottom:none;margin:0}
     `;
     document.head.appendChild(style);
 
@@ -898,12 +899,65 @@
         }
     }
 
+    // ---- КУРС selector: decides which heading source feeds the КУРС drum and the map ring
+    const CRS_MODES = [
+        { n: 'ОТКЛ', t: 'off' },
+        { n: 'Кпр1', t: 'gyro' }, { n: 'Кпр2', t: 'gyro' }, { n: 'Кпр3', t: 'gyro' },
+        { n: 'Кпр зад', t: 'gyro', rev: true },
+        { n: 'МК1', t: 'mag' }, { n: 'МК2', t: 'mag' }, { n: 'МК3', t: 'mag' },
+        { n: 'ИК', t: 'inert' },
+        { n: 'Кпнп1', t: 'mag' }, { n: 'Кпнп2', t: 'mag' }
+    ];
+    const GYRO_DRIFT = 0.4;                          // deg/min for the free-gyro positions
+    const crsSys = { mode: 6, gyro: null, lastH: null, t: 0, align: false, out: null };
+    const angDiff = (a, b) => ((a - b + 540) % 360 + 360) % 360 - 180;
+    function setCourseMode(i) {
+        crsSys.mode = i;
+        const a = $('tu-a2b');
+        if (a) a.classList.toggle('on', CRS_MODES[i].t === 'off');
+        updateCourseSystem();
+    }
+    function updateCourseSystem() {
+        const now = performance.now(), dt = crsSys.t ? Math.min(1, (now - crsSys.t) / 1000) : 0;
+        crsSys.t = now;
+        const h = getPlaneHeading(), m = CRS_MODES[crsSys.mode];
+        let out = null;
+        if (h !== null) {
+            const decl = values.crs > 180 ? values.crs - 360 : values.crs;
+            const mag = (h - decl + 360) % 360;
+            if (crsSys.gyro === null) crsSys.gyro = mag;
+            if (crsSys.lastH !== null) crsSys.gyro += angDiff(h, crsSys.lastH);
+            crsSys.lastH = h;
+            crsSys.gyro += GYRO_DRIFT / 60 * dt;
+            if (crsSys.align) {
+                const e = angDiff(mag, crsSys.gyro), step = 6 * dt;
+                if (Math.abs(e) <= Math.max(step, 0.2)) { crsSys.gyro = mag; crsSys.align = false; }
+                else crsSys.gyro += Math.sign(e) * step;
+            }
+            crsSys.gyro = (crsSys.gyro % 360 + 360) % 360;
+            if (m.t === 'mag') out = mag;
+            else if (m.t === 'inert') out = h;
+            else if (m.t === 'gyro') out = crsSys.gyro;
+            if (out !== null && m.rev) out = (out + 180) % 360;
+        }
+        crsSys.out = out;
+        const k = $('tu-kurs');
+        if (k) {
+            const txt = out === null ? '   ' : String(Math.round(out) % 360).padStart(3, '0');
+            if (k.dataset.t !== txt) {
+                k.dataset.t = txt;
+                k.innerHTML = `<div class="dr">${[...txt].map(c => `<span>${c === ' ' ? '' : c}</span>`).join('')}</div>`;
+            }
+        }
+    }
+
     let scopeAng = 0;
     function updateScope() {
+        updateCourseSystem();
         const g = $('scope-ring');
         if (!g) return;
-        const h = getPlaneHeading();
-        if (h === null) return;
+        const h = crsSys.out;
+        if (h === null) return;                      // ОТКЛ: ring and azimuth freeze
         const delta = ((-h - scopeAng + 540) % 360 + 360) % 360 - 180;
         scopeAng += delta;
         g.style.transform = `rotate(${scopeAng}deg)`;
@@ -1074,7 +1128,7 @@
         ${tgl('tu-marsh', 75, 184, 110, 44, 'h blue')}
         <div style="position:absolute;${ctr(372, 80, 86, 86)}border-radius:50%;box-sizing:border-box;background:radial-gradient(#1a1a1a,#050505);border:6px solid #0d0d0d;box-shadow:0 0 0 2px #2a2d2f,inset 0 0 10px #000"></div>
         <div style="position:absolute;${ctr(372, 80, 60, 3)}background:#e03a2a;box-shadow:0 0 4px #e03a2a"></div>
-        ${disp('disp-hdg', 204, 306, 74, 34, 'paper split')}
+        ${disp('tu-kurs', 204, 306, 74, 34, 'paper split drum')}
         ${selk('tu-crssel', 155, 395, 66, 'bat', crsAng, 6)}
         <div class="btn flat" id="btn-sync" style="${ctr(150, 466, 52, 44)}background:linear-gradient(#fff3a0,#ecc92f 55%,#caa21a);border-radius:5px;border-color:#2a2410;box-shadow:inset 0 2px 3px rgba(255,255,255,.6),inset 0 -3px 5px rgba(0,0,0,.25),0 2px 4px #000"><span class="bt" style="color:#1a1a1a;font-size:11px;line-height:1.1;white-space:normal">СОГЛАС.<br>Кпр</span></div>
         ${disp('disp-crsR', 322, 309, 62, 28, 'dec')}
@@ -1103,6 +1157,7 @@
         ${L('ДЕРЖ', 64, 296, 'xs')}${L('ДЕРЖ', 190, 296, 'xs')}${L('ДЕРЖ', 316, 296, 'xs')}
         ${rl('btn-cmda', 56, 350, 40, R)}${rl('btn-athr', 324, 350, 40, G)}
         ${L('АП', 56, 386, 'sm')}${L('АТ', 324, 386, 'sm')}
+        ${disp('disp-hdg2', 144, 300, 56, 22, 'drum dsm')}
         ${knob('wrap-hdg', 150, 346, 60, svgRound('hdg', true, false))}
         ${rl('btn-hdghold', 226, 346, 28, G)}
         ${L('ЗАДАНИЕ КУРСА', 150, 384, 'xs', WH, 'font-size:10px')}${L('ДЕРЖ', 226, 370, 'xs', WH, 'font-size:10px')}
@@ -1232,11 +1287,24 @@
     document.body.appendChild(container);
     const stage = $('mcp-stage');
 
-    const tab = document.createElement('div');
+    // toggle button: docked into the GeoFS bottom bar (falls back to a floating tab)
+    const tab = document.createElement('button');
     tab.id = 'geofs-mcp-tab';
-    tab.className = 'mcp-toggle-tab';
+    tab.className = 'mdl-button mdl-js-button geofs-f-standard-ui mcp-toggle-tab';
     tab.textContent = '🎛️ MCP PANEL';
-    document.body.appendChild(tab);
+    tab.addEventListener('click', () => tab.blur());   // don't keep keyboard focus
+    function dockTab() {
+        const bar = document.querySelector('.geofs-ui-bottom');
+        if (bar) {
+            if (tab.parentNode !== bar) bar.appendChild(tab);
+            tab.classList.remove('floating');
+        } else {
+            if (!tab.parentNode) document.body.appendChild(tab);
+            tab.classList.add('floating');
+        }
+    }
+    dockTab();
+    setInterval(dockTab, 2000);   // re-dock if GeoFS rebuilds its bar
 
     let curTheme = null, layout = LAYOUTS.b737;
 
@@ -1880,8 +1948,7 @@
         if (sc) { sc.title = 'Click: indicator screen on / off'; sc.addEventListener('click', () => sc.classList.toggle('on')); }
         const sy = $('btn-sync');
         if (sy) sy.addEventListener('click', () => {
-            const h = getPlaneHeading();
-            if (h !== null) { setVal('hdg', Math.round(h) % 360); pushValuesToGeoFS(); }
+            crsSys.align = true;                     // slew the gyro to the magnetic heading
             sy.classList.add('on');
             setTimeout(() => sy.classList.remove('on'), 350);
         });
@@ -1893,6 +1960,7 @@
             const g = el.querySelector('.rot');
             const apply = () => {
                 if (g) g.style.transform = `rotate(${angs[i]}deg)`;
+                if (el.id === 'tu-crssel') setCourseMode(i);
                 if (el.dataset.fx === 'lamp') {                       // ЛАМПА 1-4 = indicator brightness
                     const s = $('tu-scope');
                     if (s) s.style.filter = `brightness(${[0.55, 0.8, 1, 1.25][i] || 1})`;
