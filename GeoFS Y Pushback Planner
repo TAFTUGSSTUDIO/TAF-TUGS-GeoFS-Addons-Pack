@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS Y Pushback Planner
 // @namespace    GeoFS-Pushback
-// @version      11.17
-// @description  Top-down pushback / pull-forward planner: multiple stops (stop or nonstop, adjustable wait time), speed control, saved plans per airport, orbit / wing / cockpit cameras, ghost plane preview that matches the aircraft you fly. Works on GeoFS 3.9 and 4.0 (beta).
+// @version      11.18
+// @description  Top-down pushback / pull-forward planner: multiple stops (stop or nonstop, adjustable wait time), speed control, saved plans per airport, orbit / wing / cockpit cameras, ghost plane preview that matches the aircraft you fly. Collision check is advice only; turning is locked until Edit is switched on. Works on GeoFS 3.9 and 4.0 (beta).
 // @author       You
 // @match        https://*.geo-fs.com/*
 // @match        https://geo-fs.com/*
@@ -13,7 +13,7 @@
 (function () {
 "use strict";
 
-console.log("[Y Pushback] Starting v11.17...");
+console.log("[Y Pushback] Starting v11.18...");
 
 // ============================================================
 // SETTINGS
@@ -27,12 +27,12 @@ const SPEED_STEP = 0.5;              // m/s per press
 const ACCELERATION = 0.4;            // m/s^2 (gentle start)
 const DECELERATION = 0.6;            // m/s^2 (gentle slow-down)
 const STOP_DISTANCE = 1.5;           // m
-const BRAKE_DECEL = 0.7;             // m/s^2 comfortable braking before every stop (lower = longer, gentler stop)
+const BRAKE_DECEL = 0.7;             // m/s^2 comfortable braking before every stop
 const CREEP_SPEED = 0.25;            // m/s slowest speed while arriving at a stop
-const VELOCITY_SMOOTH_S = 0.5;       // seconds: how softly speed / direction changes are blended (higher = smoother)
+const VELOCITY_SMOOTH_S = 0.5;       // seconds: how softly speed / direction changes are blended
 const YAW_TARGET_SMOOTH_S = 0.7;     // seconds: how softly the wanted nose direction is blended
 const MAX_YAW_ACCEL = 0.04;          // rad/s^2 how fast the turning rate may change
-const BODY_AXIS_BLEND = 1.0;         // 0 = move exactly along the route, 1 = move exactly along the fuselage (smoother, less wheel scrubbing)
+const BODY_AXIS_BLEND = 1.0;         // 0 = move exactly along the route, 1 = move exactly along the fuselage
 const PURSUIT_SPEED_FACTOR = 2.5;    // look-ahead grows with speed (seconds of travel)
 const SLOW_DISTANCE = 15;            // m, minimum distance to start slowing before every stop
 const MAX_PLANNER_DISTANCE = 250;    // m, max distance of one stop from the previous one
@@ -48,13 +48,11 @@ const WAIT_STEP = 1;
 const UI_SCALE = 0.7;
 
 // Camera smoothing while moving (seconds, 0 = locked hard to the aircraft).
-
 const CAMERA_SMOOTH_S = 0.18;
 
 // Top view camera height above the aircraft (mouse wheel zooms).
 const CAMERA_HEIGHT_DEFAULT = 220;
 const CAMERA_HEIGHT_MIN = 20;
-
 const CAMERA_HEIGHT_MAX = 1500;
 
 const ZOOM_STEP = 1.25;              // factor per zoom button / key press
@@ -62,15 +60,6 @@ const ZOOM_STEP = 1.25;              // factor per zoom button / key press
 // ------------------------------------------------------------
 // AIRCRAFT LIST (ghost plane image + real length)
 // ------------------------------------------------------------
-// The script reads the name of the aircraft you are flying and picks the
-// matching row below (first match wins, so specific variants come first).
-//   re     = pattern tested against the aircraft name (lower case, only letters+digits,
-//            e.g. "Boeing 737-800" -> "boeing737800")
-//   length = real nose-to-tail length in metres. The image is scaled so the
-//            AIRCRAFT ITSELF (transparent / plain background cropped away)
-//            is exactly this long on the ground.
-//   day / night = texture file names (after the IMG base URL)
-//   nose   = optional, which way the nose points in that image (0 up, 90 right, 180 down, 270 left)
 const IMG = "https://raw.githubusercontent.com/Douglas-BoCo/plane/main/";
 
 const T737_100 = { day: "Boeing%20737-200%20(2).png", night: "Boeing%20737-200%20(1).png" };
@@ -97,19 +86,16 @@ const AIRCRAFT_SPECS = [
     { re: /7478/,               label: "Boeing 747-8",   length: 76.3, span: 68.4, tex: T747 },
     { re: /747/,                label: "Boeing 747-400", length: 70.7, span: 64.4, tex: T747 },
 
-    // ---- Boeing 737 (100/200 use the old-style image, everything else the 400 image) ----
+    // ---- Boeing 737 ----
     { re: /737.*max.*10/,       label: "Boeing 737 MAX 10", length: 43.8, span: 35.9, tex: T737_400 },
-
     { re: /737.*max.*9/,        label: "Boeing 737 MAX 9",  length: 42.2, span: 35.9, tex: T737_400 },
     { re: /737.*max.*7/,        label: "Boeing 737 MAX 7",  length: 35.6, span: 35.9, tex: T737_400 },
     { re: /737.*max|max.*737/,  label: "Boeing 737 MAX 8",  length: 39.5, span: 35.9, tex: T737_400 },
     { re: /737-?100/,           label: "Boeing 737-100",    length: 28.6, span: 28.4, tex: T737_100 },
     { re: /737-?200/,           label: "Boeing 737-200",    length: 30.5, span: 28.4, tex: T737_100 },
     { re: /737-?300/,           label: "Boeing 737-300",    length: 33.4, span: 28.9, tex: T737_400 },
-
     { re: /737-?400/,           label: "Boeing 737-400",    length: 36.4, span: 28.9, tex: T737_400 },
     { re: /737-?500/,           label: "Boeing 737-500",    length: 31.0, span: 28.9, tex: T737_400 },
-
     { re: /737-?600/,           label: "Boeing 737-600",    length: 31.2, span: 34.3, tex: T737_400 },
     { re: /737-?700/,           label: "Boeing 737-700",    length: 33.6, span: 35.8, tex: T737_400 },
     { re: /737-?800/,           label: "Boeing 737-800",    length: 39.5, span: 35.8, tex: T737_400 },
@@ -150,42 +136,35 @@ const AIRCRAFT_SPECS = [
 // Used when the aircraft is not in the list above: a plain silhouette of this length.
 const PLANE_LENGTH_M = 30;
 
-
-// Default direction of the nose in the texture images:
-//   0 = up, 90 = right, 180 = down, 270 = left
+// Default direction of the nose in the texture images: 0 = up, 90 = right, 180 = down, 270 = left
 const PLANE_TEXTURE_NOSE_DEG = 0;
 
-// Image cropping: the images have empty margins, so the script finds the
-// outline of the aircraft inside the image and scales THAT to the real length.
-const CROP_ALPHA_MIN = 24;           // pixel counts as aircraft if alpha >= this (transparent images)
+// Image cropping: the script finds the outline of the aircraft inside the image and scales THAT to the real length.
+const CROP_ALPHA_MIN = 24;
+const CROP_COLOR_DIFF = 40;
+const CROP_ANALYSE_SIZE = 700;
 
-const CROP_COLOR_DIFF = 40;          // ... or if its colour differs from the corner colour by more than this (opaque images)
-const CROP_ANALYSE_SIZE = 700;       // images are shrunk to this size for the analysis
-
-
-// Collision check: ghost planes (and the route) turn RED when the aircraft's
-// footprint would touch a building, vehicle, another aircraft or similar.
+// Collision check: ADVICE ONLY. Ghost planes (and the route) turn RED when the aircraft's
+// footprint might touch something tall. It never blocks you from starting.
 const COLLISION_CHECK = true;
-const COLLISION_OBSTACLE_HEIGHT_M = 2.5;   // anything taller than this above the ground counts as an obstacle
-const COLLISION_SPAN_RATIO = 0.9;          // wingspan estimate = length x this (only for aircraft not in the list)
-const COLLISION_MARGIN_M = 1.5;            // safety margin around the aircraft
-const COLLISION_PATH_STEP_M = 14;          // also check the aircraft every this many metres along the route
-const COLLISION_MP_EXTRA_M = 12;           // other online aircraft: counts as a hit within (half our length + this)
-const COLLISION_FRAME_BUDGET_MS = 6;       // max time per frame spent on the check (keeps the game smooth)
+const COLLISION_OBSTACLE_HEIGHT_M = 4;     // anything taller than this above the ground counts as an obstacle
+const COLLISION_SPAN_RATIO = 0.9;
+const COLLISION_MARGIN_M = 1.5;
+const COLLISION_PATH_STEP_M = 14;
+const COLLISION_MP_EXTRA_M = 12;
+const COLLISION_FRAME_BUDGET_MS = 6;
 
 // Look of the planner overlay.
-//   "texture" = the day / night pictures from the list above, coloured yellow / green / red
-//   "outline" = a flat outline of an aircraft instead (also used if a picture can't load)
 const GHOST_STYLE = "texture";
-const TEXTURE_TINT_ALPHA = 1;      // how strongly the picture is coloured (0 = no colour, 1 = solid colour = brightest)
-const TEXTURE_LINE_BOOST = 1;      // thickens the thin lines of the aircraft drawing so they stay visible when zoomed out (0 = off, 2 = extra thick)
-const COLOR_ROUTE = "#000095";      // blue: centre line of the route
-const COLOR_WINGTIP = "#C063B5";    // purple: paths of the two wingtips
-const COLOR_PLACING = "#D1D36D";    // yellow: aircraft while you are placing it
-const COLOR_PLACED = "#68C85E";     // green: aircraft once the stop is placed
-const COLOR_BLOCKED = "#B03D2D";    // red: something is in the way
-const OUTLINE_FILL_ALPHA = 0.14;    // how much the outline is tinted inside (0 = empty outline)
-const SHOW_HEADING_AXIS = true;     // green / red line through the aircraft you are placing (nose / tail)
+const TEXTURE_TINT_ALPHA = 1;
+const TEXTURE_LINE_BOOST = 1;
+const COLOR_ROUTE = "#000095";
+const COLOR_WINGTIP = "#C063B5";
+const COLOR_PLACING = "#D1D36D";
+const COLOR_PLACED = "#68C85E";
+const COLOR_BLOCKED = "#B03D2D";
+const OUTLINE_FILL_ALPHA = 0.14;
+const SHOW_HEADING_AXIS = true;
 
 // Sun height (dot product with local "up") below which it counts as night.
 const NIGHT_SUN_THRESHOLD = -0.05;
@@ -195,32 +174,25 @@ const STRAIGHT_FRACTION = 0.6;
 const STRAIGHT_MAX = 45;
 const STRAIGHT_MIN_DISTANCE = 6;
 const PURSUIT_LOOKAHEAD_M = 8;
-const END_STRAIGHT_M = 12;             // metres of dead-straight run-in before each stop (0 = off)
-const END_STRAIGHT_MAX_FRACTION = 0.4; // never more than this share of a short leg
+const END_STRAIGHT_M = 12;
+const END_STRAIGHT_MAX_FRACTION = 0.4;
 
 // Where the aircraft's reference point sits along the fuselage (fraction from nose).
 const PLANE_PIVOT_FROM_NOSE = 0.5;
 
-
 // Show route + ghost planes while using a non top-down camera?
 const SHOW_OVERLAY_IN_FREE_CAMERA = false;
 
-// Orbit camera limits (used by every non-top camera angle).
+// Orbit camera limits.
 const ORBIT_RANGE_DEFAULT = 55;
 const ORBIT_RANGE_MIN = 12;
 const ORBIT_RANGE_MAX = 400;
 const ORBIT_PITCH_DEFAULT = -22;
 
-// Orbit camera: slowly circles the aircraft by itself. Drag the mouse to look around
-// (it pauses while you drag and carries on a moment after you let go). 0 = no auto-circling.
-const ORBIT_AUTO_SPIN_DEG_S = 0;     // set e.g. 6 to let the Orbit camera circle by itself
+const ORBIT_AUTO_SPIN_DEG_S = 0;
 const ORBIT_SPIN_RESUME_MS = 2500;
 
-
 // Camera angles available while moving.
-//   offset = degrees around the aircraft (0 = behind tail, 90 = side, 180 = in front)
-//   follow = true: the camera turns with the aircraft; false: stays fixed in the world
-//   mount  = true: the camera is fixed ON the aircraft (cockpit / wings), see below
 const CAMERA_MODES = {
     top:     { label: "Top",     key: "1" },
     chase:   { label: "Chase",   key: "2", offset: 0,   pitch: -16, range: ORBIT_RANGE_DEFAULT, follow: true  },
@@ -233,51 +205,40 @@ const CAMERA_MODES = {
 };
 const CAMERA_ORDER = ["top", "chase", "side", "front", "orbit", "wing1", "wing2", "cockpit"];
 
-// ---- On-aircraft cameras (wing 1 = left wingtip, wing 2 = right wingtip, cockpit) ----
-// GeoFS does not publish wing geometry, so these are ESTIMATES in metres.
-// Positions are measured from the aircraft's reference point:
-//   right / forward / up.  Tune them if a camera sits in the wrong place.
-// Wing cameras look backwards (the direction of a pushback) and a little outward.
-const WING_SPAN_M = 28.4;            // full wingspan. Set to 0 to hide both wing cameras.
-// The wing cameras sit next to the fuselage above the wing root and look OUT along the wing.
-const WING_CAM_RIGHT_M = 3.0;        // distance from the centre line (metres)
-const WING_CAM_FORWARD_M = -1;       // along the fuselage (negative = behind the middle)
-const WING_CAM_UP_M = 3.6;           // height above the aircraft reference point
-const WING_LOOK_YAW_DEG = 105;       // 90 = straight out sideways, bigger = looking more backwards
-const WING_CAM_PITCH_DEG = -14;      // look down a little so the wing is in view
+// ---- On-aircraft cameras ----
+const WING_SPAN_M = 28.4;
+const WING_CAM_RIGHT_M = 3.0;
+const WING_CAM_FORWARD_M = -1;
+const WING_CAM_UP_M = 3.6;
+const WING_LOOK_YAW_DEG = 105;
+const WING_CAM_PITCH_DEG = -14;
 const WING_FOV_DEG = 85;
 
-// Cockpit: the camera position comes from the aircraft definition when GeoFS
-// provides one, otherwise from these fallbacks.
-const COCKPIT_FORWARD_FRACTION = 0.38;   // of the aircraft length ahead of the reference point
+const COCKPIT_FORWARD_FRACTION = 0.38;
 const COCKPIT_UP_M = 2.3;
 const COCKPIT_FOV_DEG = 80;
 
-
-// Per-aircraft overrides. The key is matched (case-insensitive) against the
-// aircraft's name. Any field may be left out. Example:
+// Per-aircraft overrides, e.g.
 //   "737": { cockpit: [0, 11, 2.4], wingSpan: 28.4, wingCamRight: 2.6, wingCamForward: -1, wingCamUp: 2.6, wingLookYaw: 105 }
 const AIRCRAFT_CAMERA_OVERRIDES = {};
 
 // Key that cycles through the camera angles while moving.
 const TOGGLE_VIEW_KEY = "v";
 
-// Rotation. Mouse wheel / buttons turn the heading of the stop.
+// Rotation (only works while Edit is ON). Mouse wheel / buttons turn the heading of the stop.
 const ROTATE_STEP_DEG = 5;
 const ROTATE_STEP_FINE_DEG = 1;      // hold Shift
-const NOSE_SCRUB_SPEED_MS = 1.5;     // m/s: how fast the nose wheel may be dragged sideways in a turn. The nose wheel can't steer in GeoFS,
-                                     // so a turn that is too fast makes the aircraft dig in and stop. Smaller = slower, wider turns.
-const MAX_YAW_RATE = 0.22;           // rad/s the tug may turn the aircraft
+const NOSE_SCRUB_SPEED_MS = 1.5;
+const MAX_YAW_RATE = 0.22;
 
 const YAW_GAIN = 1.6;
-const YAW_LOOKAHEAD_M = 3;           // the nose is aimed at the route this far ahead of the aircraft
-const CROSS_TRACK_GAIN = 0.35;       // how firmly the nose is turned back onto the route when the aircraft is beside it (0 = never)
+const YAW_LOOKAHEAD_M = 3;
+const CROSS_TRACK_GAIN = 0.35;
 
 // Saved plans (stored in this browser via localStorage).
 const STORE_KEY = "ypb_saved_v1";
-
 const STORE_LAST_AIRPORT_KEY = "ypb_last_airport";
-const SAVED_START_WARN_M = 25;       // warn when loading a plan and the plane is further than this from the saved start
+const SAVED_START_WARN_M = 25;
 
 // ============================================================
 // STATE
@@ -287,57 +248,56 @@ let ready = false;
 let selecting = false;
 let pushing = false;
 
+let editMode = false;        // turning only works when Edit is ON (always OFF when planning starts)
+let collisionAdvice = true;  // collision check is advice only; can be switched off with C
+
 // True while the aircraft is being moved OR the tug is still hooked up / driving away
-// (camera, panel and Esc keep working during that time).
 function inMotion() { return pushing || tugBusy(); }
 function tugBusy() { return tugActive && (tugPhase === "hold" || tugPhase === "leave"); }
-let straightMode = false;   // true = dead-straight legs (no curve), headings follow the line
+let straightMode = false;
 let towForward = false;     // false = push BACK (Y), true = pull FORWARD (T)
 let speedSetting = PUSHBACK_SPEED;
-let nonstopMode = false;             // false = stop at every stop, true = drive through intermediate stops
-let waitSeconds = WAYPOINT_PAUSE_S;  // seconds to wait at each intermediate stop (stops mode)
+let nonstopMode = false;
+let waitSeconds = WAYPOINT_PAUSE_S;
 
-let stops = [];             // confirmed stops: {lat, lon, heading}
-let preview = null;         // stop under the mouse (not yet confirmed)
-let stopEnds = [];          // distance along the route where each stop ends
-let stopIndex = 0;          // stop the plane is currently heading to
-let routeProgress = 0;      // how far along the route the plane has got
+let stops = [];
+let preview = null;
+let stopEnds = [];
+let stopIndex = 0;
+let routeProgress = 0;
 let pauseUntil = 0;
 
-
 let oldCamera = null;
-let overheadActive = false; // true while the top view owns the camera
-let orbitActive = false;    // true while an orbit-style camera owns the camera
+let overheadActive = false;
+let orbitActive = false;
 let cameraMode = "top";
-let mountActive = false;    // true while an on-aircraft camera (wing / cockpit) is used
-let mountLook = { yaw: 0, pitch: 0 };   // mouse look-around offset for on-aircraft cameras
+let mountActive = false;
+let mountLook = { yaw: 0, pitch: 0 };
 let mountFov = 80;
 let savedFov = null;
 let orbit = { heading: 0, offset: 0, follow: true, pitch: radians(-22), range: 55, spin: 0 };
-let orbitFocus = { e: 0, n: 0, u: 0 };   // Orbit camera focus point offset from the aircraft (metres, east / north / up)
+let orbitFocus = { e: 0, n: 0, u: 0 };
 let camDragButton = 0;
-let orbitLastT = 0;         // for the auto-circling of the Orbit camera
-let camDragging = false;    // mouse button held on the 3D view
-let camDragEnd = 0;         // when the last drag ended
+let orbitLastT = 0;
+let camDragging = false;
+let camDragEnd = 0;
 let measuredSpeed = 0;
 let lastMoveSample = null;
 let stallFrames = 0;
 let stallWarned = false;
-let yawHoldUntil = 0;       // while set, the aircraft stops turning for a moment (recovery when it gets stuck in a turn)
+let yawHoldUntil = 0;
 let overlayActive = false;
 let cameraHeight = CAMERA_HEIGHT_DEFAULT;
 let finishTimer = null;
-let uiLastT = 0;           // last time the on-screen numbers were refreshed
+let uiLastT = 0;
 let lastFrameT = 0;
 let frameErrors = 0;
 
-
 let startPosition = null;   // {lat, lon, alt}
 let startHeading = 0;
-let finalHeading = 0;       // heading for the next / last stop (wheel rotates this)
+let finalHeading = 0;
 
 // yaw auto-calibration
-
 let yawSign = 1;
 let yawLastHeading = null;
 let yawBadFrames = 0;
@@ -350,15 +310,13 @@ let routeLengths = [];
 let routeTotalLength = 0;
 
 let currentSpeed = 0;
-let smoothVel = { x: 0, y: 0 };   // blended velocity actually sent to the aircraft
-let smoothTarget = null;         // blended wanted heading
-let smoothYawRate = 0;           // blended turning rate
-
+let smoothVel = { x: 0, y: 0 };
+let smoothTarget = null;
+let smoothYawRate = 0;
 
 let plannerCanvas = null;
 let plannerCtx = null;
 
-// Textures are loaded on demand, one per URL: { img, loaded, crop }
 const textureCache = {};
 let nightCache = { t: 0, value: false };
 let specCache = { name: null, spec: null };
@@ -369,7 +327,6 @@ let specCache = { name: null, spec: null };
 
 let waitAttempts = 0;
 
-// Where the Cesium viewer lives can differ between GeoFS builds.
 function findViewer() {
     try {
         return (geofs.api && geofs.api.viewer) || window.viewer || geofs.viewer || null;
@@ -379,18 +336,14 @@ function findViewer() {
 }
 
 function waitForGeoFS() {
-    // Give up after ~10 minutes (e.g. we are on a non-game page of geo-fs.com).
     if (++waitAttempts > 1200) return;
 
-
-    // Make sure geofs.api.viewer exists wherever this build keeps it.
     try {
         if (window.geofs && geofs.api && !geofs.api.viewer) {
             const v = findViewer();
             if (v) geofs.api.viewer = v;
         }
     } catch (e) {}
-
 
     if (
         window.geofs &&
@@ -405,7 +358,6 @@ function waitForGeoFS() {
 
         createUI();
         createPanel();
-
         createSavedMenu();
         createPlannerCanvas();
         loadPlaneTexture();
@@ -434,16 +386,12 @@ function getPosition() {
     return { lat: a.llaLocation[0], lon: a.llaLocation[1], alt: a.llaLocation[2] };
 }
 
-
-// Position used by the cameras: follows the aircraft with a tiny delay so the
-// picture glides instead of jittering with every physics step.
 let camSmooth = null;
 let camSmoothT = 0;
 
 function resetCameraSmoothing() { camSmooth = null; }
 
 function getCameraPosition() {
-
     const p = getPosition();
     if (!p) return null;
 
@@ -455,7 +403,6 @@ function getCameraPosition() {
         camSmooth = { lat: p.lat, lon: p.lon, alt: p.alt };
         return camSmooth;
     }
-
 
     const k = 1 - Math.exp(-dt / CAMERA_SMOOTH_S);
     camSmooth.lat += (p.lat - camSmooth.lat) * k;
@@ -486,7 +433,6 @@ function getAircraftHeading() {
         }
     } catch (e) {}
 
-
     try {
         if (typeof a.heading === "number") return normalizeAngle(a.heading);
     } catch (e) {}
@@ -496,7 +442,6 @@ function getAircraftHeading() {
 
 // GeoFS spawns the aircraft with the parking brake set, and can re-apply it.
 function releaseBrakes() {
-
     try {
         if (window.controls) {
             controls.parkingBrake = 0;
@@ -507,11 +452,9 @@ function releaseBrakes() {
     try {
         geofs.animation.values.parkingBrake = 0;
         geofs.animation.values.brakes = 0;
-
     } catch (e) {}
 }
 
-// Sets the parking brake (the plane stays put once the tug lets go).
 function setParkingBrake() {
     try {
         if (window.controls) controls.parkingBrake = 1;
@@ -538,7 +481,6 @@ function normalizeAngle(angle) {
 }
 
 function angleDifference(a, b) {
-
     let d = normalizeAngle(a) - normalizeAngle(b);
     if (d > 180) d -= 360;
     if (d < -180) d += 360;
@@ -557,7 +499,6 @@ function distance(a, b) {
         Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
-
 
 // x = east, y = north (metres)
 function geoToLocal(origin, point) {
@@ -579,19 +520,15 @@ function localToGeo(origin, local) {
 
 // ---- Direction of travel (push back = opposite the nose, pull forward = along the nose) ----
 
-// Compass heading of the direction the aircraft travels when its nose points at `heading`.
 function travelHeading(heading) {
     return towForward ? heading : heading + 180;
 }
 
-// Unit vector (east, north) of that travel direction.
 function travelDir(heading) {
     const t = radians(travelHeading(heading));
     return { x: Math.sin(t), y: Math.cos(t) };
 }
 
-
-// Nose heading needed so the aircraft travels along compass bearing `bearing`.
 function noseHeadingForTravel(bearing) {
     return normalizeAngle(towForward ? bearing : bearing + 180);
 }
@@ -603,12 +540,8 @@ function modeName() { return towForward ? "PULL FORWARD" : "PUSHBACK"; }
 // AIRCRAFT TYPE (image + real length)
 // ============================================================
 
-
-// Lower-case text describing the aircraft, letters and digits only.
-// "Boeing 737-800" -> "boeing737800"
 function aircraftKey() {
     let parts = [];
-
 
     try {
         const a = aircraft();
@@ -627,21 +560,18 @@ function aircraftKey() {
 }
 
 function findSpec(key) {
-    // The "-?" in the patterns is harmless: the key has no dashes anyway.
     for (let i = 0; i < AIRCRAFT_SPECS.length; i++) {
         if (AIRCRAFT_SPECS[i].re.test(key)) return AIRCRAFT_SPECS[i];
     }
     return null;
 }
 
-// The list entry for the aircraft being flown (null = unknown aircraft).
 function planeSpec() {
     const key = aircraftKey();
 
     if (specCache.name !== key) {
         const spec = findSpec(key);
         specCache = { name: key, spec: spec };
-
 
         if (spec) {
             console.log("[Y Pushback] Aircraft \"" + key + "\" -> " + spec.label + " (" + spec.length + " m)");
@@ -655,12 +585,10 @@ function planeSpec() {
     return specCache.spec;
 }
 
-
 function planeLength() {
     const s = planeSpec();
     return s ? s.length : PLANE_LENGTH_M;
 }
-
 
 function planeNose() {
     const s = planeSpec();
@@ -668,7 +596,6 @@ function planeNose() {
     return ((n % 360) + 360) % 360;
 }
 
-// Wingspan divided by length (estimate unless the list row has `span` in metres).
 function planeSpanRatio() {
     const s = planeSpec();
     if (s && s.span) return s.span / s.length;
@@ -694,24 +621,20 @@ function applyOverheadCamera() {
 
     geofs.api.viewer.camera.setView({
         destination: Cesium.Cartesian3.fromDegrees(
-
             p.lon,
             p.lat,
             p.alt + cameraHeight
         ),
         orientation: {
-            heading: 0,                // north up
-            pitch: -Math.PI / 2,       // straight down
+            heading: 0,
+            pitch: -Math.PI / 2,
             roll: 0
         }
     });
 }
 
-// Stop driving the camera. GeoFS takes over by itself.
-
 function restoreCamera() {
     overheadActive = false;
-
     orbitActive = false;
     mountActive = false;
     restoreFov();
@@ -727,8 +650,6 @@ function applyOrbitCamera() {
     const C = window.Cesium;
     const camera = geofs.api.viewer.camera;
 
-    // "Follow" angles turn with the aircraft; free orbit stays fixed in the world
-    // and (Orbit camera) slowly circles the aircraft until you drag it yourself.
     const nowO = performance.now();
     const dtO = clamp((nowO - (orbitLastT || nowO)) / 1000, 0, 0.1);
     orbitLastT = nowO;
@@ -744,7 +665,6 @@ function applyOrbitCamera() {
     const target = C.Matrix4.multiplyByPoint(enu, new C.Cartesian3(orbitFocus.e, orbitFocus.n, orbitFocus.u), new C.Cartesian3());
 
     camera.lookAt(target, new C.HeadingPitchRange(orbit.heading, orbit.pitch, orbit.range));
-
     camera.lookAtTransform(C.Matrix4.IDENTITY);
 }
 
@@ -754,7 +674,6 @@ function aircraftName() {
     try {
         const a = aircraft();
         const n =
-
             (a.aircraftRecord && a.aircraftRecord.name) ||
             (a.definition && a.definition.name) ||
             a.name || "";
@@ -762,7 +681,6 @@ function aircraftName() {
     } catch (e) {
         return "";
     }
-
 }
 
 function aircraftOverride() {
@@ -770,7 +688,6 @@ function aircraftOverride() {
     if (!name) return null;
 
     for (const key in AIRCRAFT_CAMERA_OVERRIDES) {
-
         if (name.indexOf(key.toLowerCase()) !== -1) return AIRCRAFT_CAMERA_OVERRIDES[key];
     }
     return null;
@@ -780,7 +697,6 @@ function validTriple(v) {
     return Array.isArray(v) && v.length >= 3 && v.slice(0, 3).every(Number.isFinite);
 }
 
-// Cockpit eye position as {right, forward, up, source}.
 function cockpitPosition(o) {
     if (o && validTriple(o.cockpit)) {
         return { right: o.cockpit[0], forward: o.cockpit[1], up: o.cockpit[2], source: "override" };
@@ -790,7 +706,6 @@ function cockpitPosition(o) {
 
     try {
         const pos = aircraft().definition.cameras.cockpit.position;
-        // GeoFS definitions list positions as [right, forward, up] in metres.
         if (validTriple(pos) && Math.abs(pos[1]) <= len && Math.abs(pos[0]) <= len) {
             return { right: pos[0], forward: pos[1], up: pos[2], source: "aircraft definition" };
         }
@@ -812,18 +727,14 @@ let mountTune = (function () {
     try { return JSON.parse(localStorage.getItem(TUNE_KEY)) || {}; } catch (e) { return {}; }
 })();
 
-// Both wing cameras share one tuning (mirrored for the right side).
-
 function tuneKey(mode) {
     return (mode === "wing1" || mode === "wing2") ? "wing" : mode;
 }
 
-// Carry over an earlier Wing 1 tuning to the shared one.
 if (!mountTune.wing && mountTune.wing1) mountTune.wing = mountTune.wing1;
 
 function tuneFor(mode) {
     const k = tuneKey(mode);
-
     if (!mountTune[k]) mountTune[k] = { out: 0, forward: 0, up: 0, yaw: 0, pitch: 0 };
     return mountTune[k];
 }
@@ -856,9 +767,6 @@ function resetTune() {
     notify("CAMERA TUNING RESET");
 }
 
-// Shows the current numbers (also in the console) so they can be pasted
-// into AIRCRAFT_CAMERA_OVERRIDES.
-
 function showTuneValues() {
     const spec = mountSpec(cameraMode);
     if (!spec) return;
@@ -876,11 +784,9 @@ function showTuneValues() {
     }
 
     console.log("[Y Pushback] " + cameraMode + " camera: " + line);
-
     notify(cameraMode.toUpperCase() + " — " + line);
 }
 
-// Where an on-aircraft camera sits and looks. null = not available.
 function mountSpec(mode) {
     const o = aircraftOverride();
 
@@ -893,14 +799,13 @@ function mountSpec(mode) {
         const span = o && o.wingSpan !== undefined ? o.wingSpan : WING_SPAN_M;
         if (!(span > 0)) return null;
 
-        const side = mode === "wing1" ? -1 : 1;     // wing 1 = left, wing 2 = right
+        const side = mode === "wing1" ? -1 : 1;
 
         const right = o && o.wingCamRight !== undefined ? o.wingCamRight : WING_CAM_RIGHT_M;
         const fwd   = o && o.wingCamForward !== undefined ? o.wingCamForward : WING_CAM_FORWARD_M;
         const up    = o && o.wingCamUp !== undefined ? o.wingCamUp : WING_CAM_UP_M;
         let look    = o && o.wingLookYaw !== undefined ? o.wingLookYaw : WING_LOOK_YAW_DEG;
 
-        // Look out along the wing (same view for push and pull).
         return applyTune(mode, {
             right: side * right,
             forward: fwd,
@@ -911,10 +816,8 @@ function mountSpec(mode) {
         }, side);
     }
 
-
     return null;
 }
-
 
 function modeAvailable(mode) {
     const m = CAMERA_MODES[mode];
@@ -924,12 +827,8 @@ function modeAvailable(mode) {
 }
 
 // ---- GeoFS's own cockpit camera ----
-// The real cockpit view comes from the aircraft model, so we hand the camera
-// to GeoFS instead of guessing a position. Falls back to the estimated
-// camera (with the Tune buttons) if GeoFS doesn't expose what we need.
 let nativeCockpit = false;
 let prevGeofsCamMode = null;
-
 
 function findCockpitModeIndex(cam) {
     const lists = [cam.modes, cam.modeNames, cam.cameraModes];
@@ -945,7 +844,7 @@ function findCockpitModeIndex(cam) {
         }
     }
 
-    return 1;   // GeoFS order: follow, cockpit, cockpit-less, chase, free, fixed
+    return 1;
 }
 
 function enterNativeCockpit() {
@@ -959,14 +858,11 @@ function enterNativeCockpit() {
         cam.set(idx);
 
         if (typeof cam.currentMode === "number" && cam.currentMode !== idx) {
-            // GeoFS refused: put things back and use our own camera.
             if (prevGeofsCamMode !== null) cam.set(prevGeofsCamMode);
             return false;
-
         }
 
         return true;
-
     } catch (e) {
         console.warn("[Y Pushback] Native cockpit camera unavailable:", e);
         return false;
@@ -981,7 +877,6 @@ function leaveNativeCockpit() {
             geofs.camera.set(prevGeofsCamMode);
         }
     } catch (e) {}
-
 
     prevGeofsCamMode = null;
 }
@@ -1010,14 +905,11 @@ function applyMountCamera() {
     const C = window.Cesium;
     const camera = geofs.api.viewer.camera;
 
-    // Body offset (right / forward) -> east / north, using the aircraft heading.
     const h = radians(getAircraftHeading());
     const east = spec.right * Math.cos(h) + spec.forward * Math.sin(h);
     const north = -spec.right * Math.sin(h) + spec.forward * Math.cos(h);
 
-
     const enu = C.Transforms.eastNorthUpToFixedFrame(C.Cartesian3.fromDegrees(p.lon, p.lat, p.alt));
-
     const dest = C.Matrix4.multiplyByPoint(enu, new C.Cartesian3(east, north, spec.up), new C.Cartesian3());
 
     camera.setView({
@@ -1032,10 +924,8 @@ function applyMountCamera() {
     try { camera.frustum.fov = radians(mountFov); } catch (e) {}
 }
 
-// Switch camera angle (only while moving).
 function setCameraMode(mode) {
     if (!inMotion() || !CAMERA_MODES[mode]) return;
-
 
     if (!modeAvailable(mode)) {
         notify(CAMERA_MODES[mode].label.toUpperCase() + " CAMERA NOT AVAILABLE");
@@ -1066,9 +956,7 @@ function setCameraMode(mode) {
         mountActive = true;
 
         if (mode === "cockpit") {
-
             console.log("[Y Pushback] Cockpit camera position from: " + spec.source,
-
                 "right/forward/up =", spec.right.toFixed(1), spec.forward.toFixed(1), spec.up.toFixed(1));
         }
     } else {
@@ -1093,7 +981,6 @@ function cycleCamera(step) {
 
     let i = CAMERA_ORDER.indexOf(cameraMode);
 
-
     for (let n = 0; n < CAMERA_ORDER.length; n++) {
         i = (i + step + CAMERA_ORDER.length) % CAMERA_ORDER.length;
         if (modeAvailable(CAMERA_ORDER[i])) {
@@ -1103,14 +990,11 @@ function cycleCamera(step) {
     }
 }
 
-// Mouse look: drag = orbit / look around, wheel = zoom. Listens on the
-// GeoFS 3D canvas only, so GeoFS's own buttons and menus keep working.
+// Mouse look: drag = orbit / look around, wheel = zoom.
 function hookCameraMouse() {
     let dragging = false;
     let lx = 0, ly = 0;
 
-    // True when the mouse is over the 3D view. GeoFS can put a transparent full-screen
-    // element above the canvas, so the event target is not always the canvas itself.
     function onCanvas(event) {
         const t = event.target;
         if (!t || t === document.body || t === document.documentElement) return false;
@@ -1143,9 +1027,7 @@ function hookCameraMouse() {
     window.addEventListener("mousemove", function (e) {
         if (!dragging || !(orbitActive || mountActive)) return;
 
-
         if (orbitActive && camDragButton === 2) {
-            // Right-drag: move the point the camera looks at (Shift = up / down).
             const k = orbit.range * 0.0016;
             const mx = e.clientX - lx;
             const my = e.clientY - ly;
@@ -1160,7 +1042,6 @@ function hookCameraMouse() {
                 if (r > 200) { orbitFocus.e *= 200 / r; orbitFocus.n *= 200 / r; }
             }
         } else if (mountActive) {
-            // Look around from the wing / cockpit.
             mountLook.yaw += (e.clientX - lx) * 0.005;
             mountLook.pitch = clamp(mountLook.pitch - (e.clientY - ly) * 0.005, radians(-80), radians(80));
         } else {
@@ -1170,18 +1051,15 @@ function hookCameraMouse() {
             else orbit.heading += dx;
 
             orbit.pitch = clamp(orbit.pitch - (e.clientY - ly) * 0.005, radians(-89), radians(-2));
-
         }
 
         lx = e.clientX; ly = e.clientY;
     }, true);
 
-    // No browser menu on right-drag while the camera is moving the focus.
     window.addEventListener("contextmenu", function (e) {
         if (inMotion() && orbitActive && onCanvas(e)) e.preventDefault();
     }, true);
 
-    // Double click = back to the default view of the current camera.
     window.addEventListener("dblclick", function (e) {
         if (!inMotion() || !onCanvas(e)) return;
 
@@ -1208,21 +1086,18 @@ function hookCameraMouse() {
 
         const f = e.deltaY > 0 ? 1.1 : 1 / 1.1;
 
-
         if (orbitActive) {
             orbit.range = clamp(orbit.range * f, ORBIT_RANGE_MIN, ORBIT_RANGE_MAX);
         } else if (mountActive) {
-            mountFov = clamp(mountFov * f, 30, 110);     // wheel = zoom (field of view)
+            mountFov = clamp(mountFov * f, 30, 110);
         } else if (overheadActive) {
             cameraHeight = clamp(cameraHeight * f, CAMERA_HEIGHT_MIN, CAMERA_HEIGHT_MAX);
         }
     }, { capture: true, passive: true });
 }
 
-// Each frame, right before rendering: run the physics, then
-// re-apply our camera (GeoFS repositions its own every frame). The overlay
-
-// is drawn right after the render so both use exactly the same camera.
+// Each frame, right before rendering: run the physics, then re-apply our camera.
+// The overlay is drawn right after the render so both use exactly the same camera.
 function hookRenderLoop() {
     const scene = geofs.api.viewer.scene;
 
@@ -1237,7 +1112,6 @@ function hookRenderLoop() {
         } else if (mountActive) {
             try { applyMountCamera(); } catch (e) {}
         }
-
     });
 
     scene.postRender.addEventListener(function () {
@@ -1260,7 +1134,6 @@ function createUI() {
     ui.id = "y-pushback-ui";
 
     ui.style.cssText = `
-
         position:fixed;
         top:50px;
         left:50%;
@@ -1272,7 +1145,6 @@ function createUI() {
         padding:13px 22px;
         border-radius:10px;
         border:1px solid rgba(255,255,255,.18);
-
         font-family:Arial,sans-serif;
         text-align:center;
         display:none;
@@ -1289,7 +1161,6 @@ function createUI() {
     `;
 
     document.body.appendChild(ui);
-
 }
 
 function notify(text) {
@@ -1323,7 +1194,6 @@ function updateHeadingUI() {
 function hideUI() {
     const ui = document.getElementById("y-pushback-ui");
     if (ui) ui.style.display = "none";
-
 }
 
 // ---------- Control panel (buttons) ----------
@@ -1341,7 +1211,6 @@ function createPanel() {
             box-shadow:0 3px 12px rgba(0,0,0,.4);
         }
         .ypb-btn:hover { background:rgba(40,52,64,.95); }
-
         .ypb-btn.active { background:#1b78c9; border-color:#7cc4ff; }
         .ypb-btn:disabled { opacity:.5; cursor:not-allowed; }
         .ypb-ready { background:#1f9d55; border-color:#7de2a8; font-size:15px; padding:11px 24px; }
@@ -1356,7 +1225,6 @@ function createPanel() {
     `;
     document.head.appendChild(style);
 
-    // ---- main panel ----
     const p = document.createElement("div");
     p.id = "y-pushback-panel";
     p.style.cssText = `
@@ -1366,7 +1234,6 @@ function createPanel() {
         transform:translateX(-50%) scale(${UI_SCALE});
         transform-origin:bottom center;
         z-index:1000000;
-
         display:none;
         flex-direction:column;
         align-items:center;
@@ -1374,7 +1241,6 @@ function createPanel() {
         max-width:94vw;
         font-family:Arial,sans-serif;
         background:rgba(8,10,12,.62);
-
         padding:8px 12px;
         border-radius:12px;
     `;
@@ -1388,12 +1254,13 @@ function createPanel() {
         <div id="y-pb-setup" class="ypb-row">
             <button class="ypb-btn" data-act="rotL">⟲ Rotate</button>
             <button class="ypb-btn" data-act="rotR">Rotate ⟳</button>
+            <button id="y-pb-edit-btn" class="ypb-btn" data-act="edit" title="Key E">✎ Edit: OFF</button>
+            <button id="y-pb-coll-btn" class="ypb-btn" data-act="collision" title="Key C">⚠ Collision advice: ON</button>
             <button class="ypb-btn" data-act="undo">Undo stop</button>
             <button class="ypb-btn" data-act="clear">Clear all</button>
             <button id="y-pb-straight-btn" class="ypb-btn" data-act="straight" title="Key L">━ Straight: OFF</button>
             <button class="ypb-btn ypb-save" data-act="savePlan" title="Key S">💾 Save plan</button>
             <button class="ypb-btn" data-act="openSaved">📂 Saved</button>
-
             <button class="ypb-btn" data-act="cancel">Cancel</button>
         </div>
         <div id="y-pb-ready" class="ypb-row">
@@ -1425,11 +1292,9 @@ function createPanel() {
         </div>
         <div id="y-pb-tune" class="ypb-row">
             <span class="ypb-label">Tune</span>
-
             <span class="ypb-label">Fwd</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="forward" data-d="-0.5">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="forward" data-d="0.5">+</button>
             <span class="ypb-label">Up</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="up" data-d="-0.3">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="up" data-d="0.3">+</button>
             <span class="ypb-label">Out</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="out" data-d="-0.3">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="out" data-d="0.3">+</button>
-
             <span class="ypb-label">Turn</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="yaw" data-d="-5">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="yaw" data-d="5">+</button>
             <span class="ypb-label">Tilt</span><button class="ypb-btn ypb-spd" data-act="tune" data-k="pitch" data-d="-3">−</button><button class="ypb-btn ypb-spd" data-act="tune" data-k="pitch" data-d="3">+</button>
             <button class="ypb-btn" data-act="tuneReset">Reset</button>
@@ -1455,6 +1320,8 @@ function createPanel() {
         switch (b.dataset.act) {
             case "rotL":      rotateFinalHeading(-ROTATE_STEP_DEG); break;
             case "rotR":      rotateFinalHeading(ROTATE_STEP_DEG); break;
+            case "edit":      toggleEdit(); break;
+            case "collision": toggleCollision(); break;
             case "undo":      undoStop(); break;
             case "clear":     clearStops(); break;
             case "cancel":    cancelSelection(); break;
@@ -1462,7 +1329,6 @@ function createPanel() {
             case "stop":      stopPushback(); break;
             case "cam":       setCameraMode(b.dataset.cam); break;
             case "spdD":      changeSpeed(-SPEED_STEP); break;
-
             case "spdU":      changeSpeed(SPEED_STEP); break;
             case "nonstop":   toggleNonstop(); break;
             case "waitD":     changeWait(-WAIT_STEP); break;
@@ -1476,7 +1342,6 @@ function createPanel() {
             case "tuneReset": resetTune(); break;
             case "tuneShow":  showTuneValues(); break;
             case "zoomIn":    zoomView(1 / ZOOM_STEP); break;
-
             case "zoomOut":   zoomView(ZOOM_STEP); break;
             case "straight":  toggleStraight(); break;
             case "savePlan":  savePlan(); break;
@@ -1497,7 +1362,6 @@ function createPanel() {
         left:10px;
         transform:scale(${UI_SCALE});
         transform-origin:bottom left;
-
         z-index:1000000;
         display:flex;
         gap:6px;
@@ -1521,12 +1385,10 @@ function createPanel() {
     updatePanel();
 }
 
-
 function setRow(id, on) {
     const el = document.getElementById(id);
     if (el) el.style.display = on ? "flex" : "none";
 }
-
 
 function updatePanel() {
     const p = document.getElementById("y-pushback-panel");
@@ -1565,40 +1427,51 @@ function updatePanel() {
     const launcher = document.getElementById("y-pushback-launcher");
     if (launcher) launcher.style.display = (selecting || inMotion()) ? "none" : "flex";
 
-
     const stb = document.getElementById("y-pb-straight-btn");
     if (stb) {
         stb.textContent = "━ Straight: " + (straightMode ? "ON" : "OFF");
         stb.classList.toggle("active", straightMode);
     }
 
+    // Edit (turning) lock + collision advice buttons
+    const eb = document.getElementById("y-pb-edit-btn");
+    if (eb) {
+        eb.textContent = "✎ Edit: " + (editMode ? "ON" : "OFF");
+        eb.classList.toggle("active", editMode);
+    }
+    const cb = document.getElementById("y-pb-coll-btn");
+    if (cb) {
+        cb.textContent = "⚠ Collision advice: " + (collisionAdvice ? "ON" : "OFF");
+        cb.classList.toggle("active", collisionAdvice);
+    }
+    p.querySelectorAll('[data-act="rotL"],[data-act="rotR"]').forEach(function (b) {
+        b.disabled = !editMode;
+    });
+
     const sv = document.getElementById("y-pb-speed-val");
     if (sv) sv.textContent = speedSetting.toFixed(1) + " m/s";
 
+    // Ready button is never red: the collision check is advice only.
     const rb = document.getElementById("y-pb-ready-btn");
     if (rb) {
         rb.disabled = stops.length === 0;
-
         rb.textContent = stops.length
-            ? (collisionWarn ? "⚠ COLLISION RISK — START " : "✔ READY — START ") + modeName() + " (" + stops.length + (stops.length === 1 ? " stop)" : " stops)")
+            ? "✔ READY — START " + modeName() + " (" + stops.length + (stops.length === 1 ? " stop)" : " stops)") + (collisionWarn ? "  ⚠ check route" : "")
             : "NOT READY — CLICK TO ADD A STOP";
-        rb.style.background = (stops.length && collisionWarn) ? "#c62828" : "";
-        rb.style.borderColor = (stops.length && collisionWarn) ? "#ff8a80" : "";
+        rb.style.background = "";
+        rb.style.borderColor = "";
     }
 
     p.querySelectorAll("[data-cam]").forEach(function (b) {
         b.classList.toggle("active", b.dataset.cam === cameraMode);
-        // Wing cameras only show up when the aircraft has a usable wingspan.
-
         b.style.display = (inMotion() && !modeAvailable(b.dataset.cam)) ? "none" : "";
     });
 }
 
 // ============================================================
-// SPEED / STOP-MODE / WAIT CONTROL
+// SPEED / STOP-MODE / WAIT / EDIT / COLLISION CONTROL
 // ============================================================
 
-// Top-view zoom: factor < 1 = closer, factor > 1 = further away.
 function zoomView(factor) {
     cameraHeight = clamp(cameraHeight * factor, CAMERA_HEIGHT_MIN, CAMERA_HEIGHT_MAX);
 }
@@ -1609,7 +1482,6 @@ function changeSpeed(delta) {
     notify("SPEED " + speedSetting.toFixed(1) + " m/s");
 }
 
-// Stops (stop + wait at every stop) <-> Nonstop (drive through, only stop at the end).
 function toggleNonstop() {
     if (!(selecting || pushing)) return;
     nonstopMode = !nonstopMode;
@@ -1626,17 +1498,33 @@ function changeWait(delta) {
     notify("WAIT " + waitSeconds + " s AT EACH STOP");
 }
 
+// Edit ON = wheel / Rotate buttons / R key can turn the stop. OFF (default) = turning is locked.
+function toggleEdit() {
+    if (!selecting) return;
+    editMode = !editMode;
+    updatePanel();
+    notify(editMode ? "EDIT ON — WHEEL / ROTATE BUTTONS TURN THE STOP" : "EDIT OFF — TURNING LOCKED");
+}
+
+// Collision check is advice only; this switches it off completely.
+function toggleCollision() {
+    if (!selecting) return;
+    collisionAdvice = !collisionAdvice;
+    collisionWarn = false;
+    clearCollisionCache();
+    updatePanel();
+    notify(collisionAdvice ? "COLLISION ADVICE ON" : "COLLISION ADVICE OFF");
+}
+
 // ============================================================
 // SAVED PLANS (per airport)
 // ============================================================
-
 
 function loadStore() {
     try {
         const v = JSON.parse(localStorage.getItem(STORE_KEY));
         return Array.isArray(v) ? v : [];
     } catch (e) {
-
         return [];
     }
 }
@@ -1657,7 +1545,6 @@ function escapeHtml(s) {
         return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
 }
-
 
 function savePlan() {
     if (!selecting || !stops.length) {
@@ -1680,7 +1567,6 @@ function savePlan() {
         name: name.trim() || "Plan",
         forward: towForward,
         straight: straightMode,
-
         speed: speedSetting,
         nonstop: nonstopMode,
         wait: waitSeconds,
@@ -1691,7 +1577,6 @@ function savePlan() {
     };
 
     const list = loadStore();
-
     list.push(entry);
 
     if (writeStore(list)) {
@@ -1712,7 +1597,6 @@ function createSavedMenu() {
         transform:translate(-50%,-50%) scale(${UI_SCALE});
         z-index:1000001;
         display:none;
-
         background:rgba(8,10,12,.97);
         color:#fff;
         border:1px solid rgba(255,255,255,.22);
@@ -1744,7 +1628,6 @@ function createSavedMenu() {
     });
 
     document.body.appendChild(m);
-
 }
 
 function renderSaved() {
@@ -1764,7 +1647,6 @@ function renderSaved() {
 
     const airports = Object.keys(groups).sort();
 
-
     if (!airports.length) {
         html += '<div style="opacity:.7;font-size:13px;">Nothing saved yet. Plan a route, then press “💾 Save plan”.</div>';
     }
@@ -1782,7 +1664,6 @@ function renderSaved() {
                 '<button class="ypb-btn" style="padding:5px 10px;" data-act="load" data-id="' + escapeHtml(s.id) + '">Load</button>' +
                 '<button class="ypb-btn ypb-stop" style="padding:5px 10px;" data-act="del" data-id="' + escapeHtml(s.id) + '">🗑</button>' +
                 '</div>';
-
         });
     });
 
@@ -1798,7 +1679,6 @@ function openSaved() {
 
 function closeSaved() {
     const m = document.getElementById("y-pb-saved");
-
     if (m) m.style.display = "none";
 }
 
@@ -1820,7 +1700,6 @@ function loadSaved(id) {
     nonstopMode = !!entry.nonstop;
     waitSeconds = clamp(entry.wait !== undefined ? Number(entry.wait) : WAYPOINT_PAUSE_S, WAIT_MIN, WAIT_MAX);
 
-
     const list = entry.stops.map(function (s) { return { lat: s.lat, lon: s.lon, heading: s.heading }; });
 
     if (!buildChain(list)) {
@@ -1833,7 +1712,6 @@ function loadSaved(id) {
     stops = list;
     preview = null;
     finalHeading = stops[stops.length - 1].heading;
-
 
     let msg = "LOADED: " + entry.airport + " — " + entry.name + " — PRESS READY";
 
@@ -1854,7 +1732,6 @@ function loadSaved(id) {
 function createPlannerCanvas() {
     if (document.getElementById("y-pushback-planner")) return;
 
-
     plannerCanvas = document.createElement("canvas");
     plannerCanvas.id = "y-pushback-planner";
 
@@ -1872,19 +1749,15 @@ function createPlannerCanvas() {
     document.body.appendChild(plannerCanvas);
     plannerCtx = plannerCanvas.getContext("2d");
 
-
     resizePlanner();
     window.addEventListener("resize", resizePlanner);
 
     plannerCanvas.addEventListener("mousemove", plannerMouseMove);
     plannerCanvas.addEventListener("click", plannerClick);
 
-    // Cursor left the map (e.g. onto the buttons): drop the hover preview,
-    // so the rotate buttons act on the last confirmed stop.
     plannerCanvas.addEventListener("mouseleave", function () {
         if (!selecting || !preview) return;
         preview = null;
-
         rebuildRoute();
     });
 
@@ -1896,7 +1769,7 @@ function createPlannerCanvas() {
         else cancelSelection();
     });
 
-    // Mouse wheel = rotate the heading of the stop.
+    // Mouse wheel = rotate the heading of the stop (only while Edit is ON).
     // Shift = fine steps, Ctrl = zoom the top view.
     plannerCanvas.addEventListener(
         "wheel",
@@ -1906,7 +1779,6 @@ function createPlannerCanvas() {
             const dir = (event.deltaY || event.deltaX) > 0 ? 1 : -1;
 
             if (event.ctrlKey) {
-
                 cameraHeight = clamp(
                     cameraHeight * (dir > 0 ? 1.12 : 1 / 1.12),
                     CAMERA_HEIGHT_MIN,
@@ -1915,7 +1787,7 @@ function createPlannerCanvas() {
                 return;
             }
 
-            if (!selecting) return;
+            if (!selecting || !editMode) return;
 
             rotateFinalHeading(
                 dir * (event.shiftKey ? ROTATE_STEP_FINE_DEG : ROTATE_STEP_DEG)
@@ -1923,16 +1795,13 @@ function createPlannerCanvas() {
         },
         { passive: false }
     );
-
 }
 
-// Heading the nose must have so the aircraft travels straight from `from` to `to`.
 function lineHeading(from, to) {
     const l = geoToLocal(from, to);
     return noseHeadingForTravel(degrees(Math.atan2(l.x, l.y)));
 }
 
-// Straight mode: every stop's heading follows the line that leads to it.
 function straightenStops() {
     let prev = startPosition;
 
@@ -1959,7 +1828,6 @@ function toggleStraight() {
         finalHeading = oldFinal;
         rebuildRoute();
         notify("CAN'T STRAIGHTEN THIS ROUTE — UNDO OR MOVE A STOP");
-
         updatePanel();
         return;
     }
@@ -1970,12 +1838,16 @@ function toggleStraight() {
     updatePanel();
 }
 
-// Rotates the stop being placed (the hover preview), or the last
-// confirmed stop when nothing is under the cursor.
+// Rotates the stop being placed (the hover preview), or the last confirmed stop.
+// Locked unless Edit is ON.
 function rotateFinalHeading(delta) {
+    if (!editMode) {
+        notify("TURNING LOCKED — PRESS ✎ EDIT (E) TO ROTATE");
+        return;
+    }
+
     if (straightMode) {
         notify("STRAIGHT MODE — HEADING FOLLOWS THE LINE (PRESS L TO TURN OFF)");
-
         return;
     }
 
@@ -1986,7 +1858,6 @@ function rotateFinalHeading(delta) {
     } else if (stops.length) {
         stops[stops.length - 1].heading = finalHeading;
     }
-
 
     rebuildRoute();
     updateDistanceUI(routeTotalLength);
@@ -2012,14 +1883,12 @@ function showPlanner() {
 
 function hidePlanner() {
     if (plannerCanvas) plannerCanvas.style.display = "none";
-
 }
 
 // ============================================================
 // PLANE TEXTURE
 // ============================================================
 
-// Starts loading the images of the current aircraft.
 function loadPlaneTexture() {
     planeSpec();
 }
@@ -2027,7 +1896,6 @@ function loadPlaneTexture() {
 // Finds the aircraft inside the picture (ignores the empty margin) and
 // returns its bounding box in image pixels: {x, y, w, h}.
 function computeCrop(img) {
-
     const W = img.naturalWidth;
     const H = img.naturalHeight;
     const full = { x: 0, y: 0, w: W, h: H, cropped: false };
@@ -2036,7 +1904,6 @@ function computeCrop(img) {
         const k = Math.min(1, CROP_ANALYSE_SIZE / Math.max(W, H));
         const cw = Math.max(1, Math.round(W * k));
         const ch = Math.max(1, Math.round(H * k));
-
 
         const c = document.createElement("canvas");
         c.width = cw;
@@ -2047,8 +1914,6 @@ function computeCrop(img) {
 
         const d = g.getImageData(0, 0, cw, ch).data;
 
-        // Background = the four corners. Transparent corners -> use alpha,
-        // otherwise compare colours with the corner colour.
         const corners = [
             0,
             (cw - 1) * 4,
@@ -2066,7 +1931,6 @@ function computeCrop(img) {
 
         br /= 4; bg /= 4; bb /= 4;
 
-
         let minX = cw, minY = ch, maxX = -1, maxY = -1;
 
         for (let y = 0; y < ch; y++) {
@@ -2079,7 +1943,6 @@ function computeCrop(img) {
                         Math.abs(d[o] - br),
                         Math.abs(d[o + 1] - bg),
                         Math.abs(d[o + 2] - bb)
-
                     );
                     if (diff <= CROP_COLOR_DIFF) continue;
                 }
@@ -2088,7 +1951,6 @@ function computeCrop(img) {
                 if (x > maxX) maxX = x;
                 if (y < minY) minY = y;
                 if (y > maxY) maxY = y;
-
             }
         }
 
@@ -2102,23 +1964,19 @@ function computeCrop(img) {
         const box = { x: x0, y: y0, w: x1 - x0, h: y1 - y0, cropped: true,
             bg: transparentBg ? null : { r: br, g: bg, b: bb } };
 
-        // Something went wrong (almost nothing found): use the whole image.
         if (box.w < W * 0.08 || box.h < H * 0.08) return full;
 
         return box;
     } catch (e) {
-        // Image from another site without CORS: pixels can't be read.
         console.warn("[Y Pushback] Can't read image pixels to crop it (CORS) — using the whole image.", e);
         return full;
     }
 }
 
-// Loads (once) and returns the cache slot for an image file name.
 function getTexture(file) {
     const url = IMG + file;
     let slot = textureCache[url];
     if (slot) return slot;
-
 
     slot = textureCache[url] = { img: null, loaded: false, crop: null, failed: false };
 
@@ -2131,7 +1989,6 @@ function getTexture(file) {
         img.onload = function () {
             slot.img = img;
             slot.crop = computeCrop(img);
-
             slot.loaded = true;
             console.log("[Y Pushback] texture loaded:", file,
                 img.naturalWidth + "x" + img.naturalHeight,
@@ -2139,10 +1996,8 @@ function getTexture(file) {
                 slot.crop.cropped ? "(cropped)" : "(not cropped)");
         };
 
-
         img.onerror = function () {
             slot.loaded = false;
-            // Retry without CORS: the image can still be drawn, just not cropped.
             if (!triedWithoutCors) {
                 triedWithoutCors = true;
                 load(false);
@@ -2159,7 +2014,6 @@ function getTexture(file) {
     return slot;
 }
 
-// Is the sun below the horizon at the aircraft (in GeoFS's own clock)?
 function isNight() {
     const now = performance.now();
     if (now - nightCache.t < 2000) return nightCache.value;
@@ -2172,7 +2026,6 @@ function isNight() {
         const p = getPosition();
         const jd = viewer.clock.currentTime;
 
-
         const sunInertial =
             C.Simon1994PlanetaryPositions.computeSunPositionInEarthInertialFrame(jd);
 
@@ -2183,7 +2036,6 @@ function isNight() {
         const up = C.Ellipsoid.WGS84.geodeticSurfaceNormal(
             C.Cartesian3.fromDegrees(p.lon, p.lat, 0),
             new C.Cartesian3()
-
         );
 
         night = C.Cartesian3.dot(sun, up) < NIGHT_SUN_THRESHOLD;
@@ -2191,12 +2043,10 @@ function isNight() {
         night = false;
     }
 
-
     nightCache = { t: now, value: night };
     return night;
 }
 
-// The day or night picture of the current aircraft: {img, crop} or null.
 function currentTexture() {
     const spec = planeSpec();
     if (!spec) return null;
@@ -2224,7 +2074,6 @@ function getGroundPoint(clientX, clientY) {
     const viewer = geofs.api.viewer;
     const Cesium = window.Cesium;
 
-
     try {
         const r = canvasRect();
         const pos = new Cesium.Cartesian2(clientX - r.left, clientY - r.top);
@@ -2235,12 +2084,10 @@ function getGroundPoint(clientX, clientY) {
         if (ray) position = viewer.scene.globe.pick(ray, viewer.scene);
 
         if (!position) {
-
             position = viewer.camera.pickEllipsoid(pos, Cesium.Ellipsoid.WGS84);
         }
 
         if (!position) return null;
-
 
         const c = Cesium.Cartographic.fromCartesian(position);
         return { lat: degrees(c.latitude), lon: degrees(c.longitude) };
@@ -2250,7 +2097,6 @@ function getGroundPoint(clientX, clientY) {
     }
 }
 
-// Geo point -> screen pixels, using the real Cesium camera.
 function getScreenPosition(point, alt) {
     if (!point) return null;
 
@@ -2264,7 +2110,6 @@ function getScreenPosition(point, alt) {
 
         const cart = Cesium.Cartesian3.fromDegrees(point.lon, point.lat, alt);
 
-        // Ignore anything behind the camera.
         const cam = viewer.camera;
         const toPoint = Cesium.Cartesian3.subtract(cart, cam.positionWC, new Cesium.Cartesian3());
         if (Cesium.Cartesian3.dot(toPoint, cam.directionWC) <= 0) return null;
@@ -2288,13 +2133,6 @@ function getScreenPosition(point, alt) {
 // BUILD ROUTE (chain of segments, one per stop)
 // ============================================================
 
-
-// One segment: from `o` (local metres) travelling along `heading`'s travel
-// direction (backwards for pushback, forwards for pull), ending at `t`
-// while travelling along `endHeading`'s travel direction.
-
-// The path is: straight leg -> smooth curve -> straight run-in to the stop.
-// Returns an array of local points, or null if the stop can't be reached.
 function buildSegment(o, heading, t, endHeading) {
     const dx = t.x - o.x;
     const dy = t.y - o.y;
@@ -2323,27 +2161,20 @@ function buildSegment(o, heading, t, endHeading) {
         return line;
     }
 
-    // 1) a straight leg dead along the travel direction, 2) a smooth curve,
-    // 3) a straight run-in lined up with the stop's heading.
     const rearProj = dx * rearX + dy * rearY;
     let straight = 0;
 
     if (rearProj > STRAIGHT_MIN_DISTANCE) {
         straight = clamp(rearProj * STRAIGHT_FRACTION, 0, STRAIGHT_MAX);
-
     }
 
     const S = { x: o.x + rearX * straight, y: o.y + rearY * straight };
 
-    // The tug arrives travelling along ITS final heading's travel direction.
     const endTr = travelDir(endHeading);
     const endRearX = endTr.x;
     const endRearY = endTr.y;
 
-
-    // The curve ends at E, a few metres before the stop; E -> stop is a straight run-in.
     const dTotal = Math.hypot(t.x - S.x, t.y - S.y);
-
     const endStraight = Math.min(END_STRAIGHT_M, dTotal * END_STRAIGHT_MAX_FRACTION);
 
     const E = { x: t.x - endRearX * endStraight, y: t.y - endRearY * endStraight };
@@ -2379,11 +2210,9 @@ function buildSegment(o, heading, t, endHeading) {
         });
     }
 
-    // Straight run-in from E to the stop.
     if (endStraight > 0.5) {
         const n = Math.max(2, Math.ceil(endStraight / 2));
         for (let i = 1; i <= n; i++) {
-
             pts.push({
                 x: E.x + (t.x - E.x) * i / n,
                 y: E.y + (t.y - E.y) * i / n
@@ -2391,10 +2220,8 @@ function buildSegment(o, heading, t, endHeading) {
         }
     }
 
-
     return pts;
 }
-
 
 // Builds the whole route through `list` (array of {lat, lon, heading}).
 // On failure nothing is changed and false is returned.
@@ -2436,15 +2263,10 @@ function buildChain(list) {
     return true;
 }
 
-
-// Rebuild the drawn route from the confirmed stops (+ the hover preview).
 function rebuildRoute() {
     const list = stops.concat(preview ? [preview] : []);
 
     if (buildChain(list)) return true;
-
-
-    // The preview can't be reached: drop it and keep the confirmed route.
 
     preview = null;
     buildChain(stops);
@@ -2472,13 +2294,9 @@ function getRoutePointAtDistance(distanceAlong) {
     return routePoints[routePoints.length - 1];
 }
 
-// Nearest point on the route, searched only around the progress made so far,
-// so routes that pass close to themselves don't make the plane jump ahead.
 function findNearestRouteDistance(localPosition) {
     if (!routePoints.length) return 0;
 
-    // Projects the position onto the route line itself (not just onto its corner points),
-    // so the progress along the route is continuous and the movement stays smooth.
     function search(lo, hi) {
         let best = Infinity;
         let bestDist = -1;
@@ -2496,7 +2314,6 @@ function findNearestRouteDistance(localPosition) {
             const d = px * px + py * py;
 
             if (d < best) {
-
                 best = d;
                 bestDist = routeLengths[i - 1] + (routeLengths[i] - routeLengths[i - 1]) * t;
             }
@@ -2530,12 +2347,8 @@ function getRouteTangent(distanceAlong) {
 }
 
 // ============================================================
-// COLLISION CHECK
+// COLLISION CHECK (ADVICE ONLY)
 // ============================================================
-// Samples the scene height at points along the aircraft's footprint
-// (fuselage, wings, tail). Anything clearly taller than the ground there
-// (buildings, vehicles, other aircraft...) counts as a hit. The aircraft you
-// are flying is ignored. Online aircraft are also checked by distance.
 
 const collisionCache = {};
 let collisionCount = 0;
@@ -2548,21 +2361,17 @@ function clearCollisionCache() {
     collisionCount = 0;
 }
 
-
 function collisionSupported() {
-    if (!COLLISION_CHECK) return false;
+    if (!COLLISION_CHECK || !collisionAdvice) return false;
 
     try {
-
         const s = geofs.api.viewer.scene;
         return typeof s.sampleHeight === "function" && s.sampleHeightSupported !== false;
     } catch (e) {
         return false;
-
     }
 }
 
-// Points (geo) covering the aircraft's footprint at `center`, nose along `heading`.
 function footprintPoints(center, heading, light) {
     const L = planeLength();
     const S = L * planeSpanRatio();
@@ -2578,14 +2387,14 @@ function footprintPoints(center, heading, light) {
         pts.push(localToGeo(center, { x: fwd * sh + right * ch, y: fwd * ch - right * sh }));
     }
 
-    const fus = light ? 2 : 4;           // fuselage points per side of the centre
+    const fus = light ? 2 : 4;
     for (let i = -fus; i <= fus; i++) add(i / fus * halfL, 0);
 
-    for (let i = -2; i <= 2; i++) {      // wings
+    for (let i = -2; i <= 2; i++) {
         if (i) add(L * 0.05, i / 2 * halfS);
     }
 
-    if (!light) {                        // tailplane
+    if (!light) {
         add(-L * 0.42, -S * 0.18);
         add(-L * 0.42, S * 0.18);
     }
@@ -2605,11 +2414,7 @@ function insideOwnFootprint(geo, own) {
 
     if (Math.abs(fwd) < L / 2 + 3 && Math.abs(right) < L * planeSpanRatio() / 2 + 3) return true;
 
-    // The pushback tug is part of "us" too (it is a tall 3D model that the
-
-    // height check would otherwise mistake for an obstacle).
     if (tugActive && Math.hypot(fwd - tugNoseOffset, right) < TUG_CLEAR_RADIUS_M) return true;
-
 
     return false;
 }
@@ -2630,7 +2435,6 @@ function pointBlocked(geo) {
     return top - ground > COLLISION_OBSTACLE_HEIGHT_M;
 }
 
-// Another online aircraft close to `center`?
 function multiplayerNear(center, own) {
     try {
         const users = window.multiplayer && multiplayer.visibleUsers;
@@ -2648,9 +2452,9 @@ function multiplayerNear(center, own) {
 
             const p = { lat: lla[0], lon: lla[1] };
 
-            if (own && distance(own.pos, p) < 3) continue;                       // that's us
+            if (own && distance(own.pos, p) < 3) continue;
 
-            if (Number.isFinite(lla[2]) && own && Math.abs(lla[2] - own.pos.alt) > 30) continue;   // flying overhead
+            if (Number.isFinite(lla[2]) && own && Math.abs(lla[2] - own.pos.alt) > 30) continue;
 
             if (distance(center, p) < limit) return true;
         }
@@ -2658,7 +2462,6 @@ function multiplayerNear(center, own) {
 
     return false;
 }
-
 
 function evalPose(center, heading, light) {
     const p = getPosition();
@@ -2676,8 +2479,6 @@ function evalPose(center, heading, light) {
     return { hit: hits.length > 0 || multiplayerNear(center, own), hits: hits, t: performance.now() };
 }
 
-// Cached check. Results are refreshed after `ttl` ms, a little at a time so
-// the game never stalls.
 function getCollision(center, heading, ttl, light) {
     const key = center.lat.toFixed(6) + "," + center.lon.toFixed(6) + "," + Math.round(heading) + (light ? "L" : "F");
     const now = performance.now();
@@ -2694,12 +2495,14 @@ function getCollision(center, heading, ttl, light) {
     return r;
 }
 
-// Poses along the route where the aircraft would hit something.
+// Poses along the route where the aircraft might hit something.
 function pathCollisions() {
     const out = [];
     if (routeTotalLength < 1) return out;
 
     for (let d = COLLISION_PATH_STEP_M; d < routeTotalLength; d += COLLISION_PATH_STEP_M) {
+        // The first part of the route is still over our own aircraft / tug: skip it.
+        if (d < planeLength()) continue;
 
         if (pushing && d < routeProgress) continue;
 
@@ -2712,14 +2515,11 @@ function pathCollisions() {
         const c = getCollision(center, heading, 3000, true);
 
         if (c && c.hit) out.push({ center: center, heading: heading, hits: c.hits });
-
     }
-
 
     return out;
 }
 
-// Line through the aircraft along its heading: green ahead of the nose, red behind the tail.
 function drawHeadingAxis(ctx, geo, alt, heading) {
     const L = planeLength();
     const h = radians(heading);
@@ -2740,8 +2540,8 @@ function drawHeadingAxis(ctx, geo, alt, heading) {
 
     ctx.save();
     ctx.globalAlpha = 0.9;
-    line(L / 2, L / 2 + 80, COLOR_PLACED);       // ahead of the nose
-    line(-L / 2, -L / 2 - 80, COLOR_BLOCKED);    // behind the tail
+    line(L / 2, L / 2 + 80, COLOR_PLACED);
+    line(-L / 2, -L / 2 - 80, COLOR_BLOCKED);
     ctx.restore();
 }
 
@@ -2750,7 +2550,6 @@ function drawHitDots(ctx, hits, alt) {
     ctx.fillStyle = COLOR_BLOCKED;
     ctx.strokeStyle = "rgba(255,255,255,.9)";
     ctx.lineWidth = 1.5;
-
 
     hits.forEach(function (g) {
         const s = getScreenPosition(g, alt);
@@ -2786,7 +2585,7 @@ function drawPlanner() {
     const items = [];
 
     stops.forEach(function (s, i) {
-        if (pushing && i < stopIndex) return;   // already reached
+        if (pushing && i < stopIndex) return;
         items.push({ s: s, n: i + 1, alpha: 0.85, ttl: 2500, state: "placed" });
     });
 
@@ -2796,15 +2595,13 @@ function drawPlanner() {
     const useCollision = collisionSupported();
     let warn = false;
 
-    if (COLLISION_CHECK && !useCollision && !collisionNoteShown) {
+    if (COLLISION_CHECK && !useCollision && collisionAdvice && !collisionNoteShown) {
         collisionNoteShown = true;
         console.warn("[Y Pushback] Collision check unavailable (scene.sampleHeight not supported).");
     }
 
     collisionBudgetEnd = performance.now() + COLLISION_FRAME_BUDGET_MS;
 
-
-    // Route legs first (drawn underneath), stops get the check budget first.
     const results = items.map(function (item) {
         return useCollision ? getCollision(item.s, item.s.heading, item.ttl, false) : null;
     });
@@ -2816,8 +2613,6 @@ function drawPlanner() {
             drawHitDots(ctx, p.hits, alt);
         });
     }
-
-
 
     items.forEach(function (item, i) {
         const c = results[i];
@@ -2834,7 +2629,7 @@ function drawPlanner() {
         if (g) {
             const label = "STOP " + item.n + "  •  HDG " +
                 Math.round(item.s.heading).toString().padStart(3, "0") + "°" +
-                (danger ? "  •  BLOCKED" : "");
+                (danger ? "  •  CHECK" : "");
             drawTargetLabel(ctx, g.x, g.y, planeLength() * g.ppm, label, danger);
         }
     });
@@ -2847,13 +2642,11 @@ function drawPlanner() {
     drawPlannerText(ctx, width, height);
 }
 
-// Draws a polyline given in local metres, skipping parts behind the camera.
 function strokeLocalLine(ctx, localPts, color, width) {
     const segments = [];
     let cur = [];
 
     for (let i = 0; i < localPts.length; i++) {
-
         const sp = getScreenPosition(localToGeo(startPosition, localPts[i]));
         if (sp) {
             cur.push(sp);
@@ -2868,9 +2661,7 @@ function strokeLocalLine(ctx, localPts, color, width) {
     segments.forEach(function (pts) {
         if (pts.length < 2) return;
         ctx.moveTo(pts[0].x, pts[0].y);
-
         for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-
     });
 
     ctx.lineWidth = width;
@@ -2878,8 +2669,6 @@ function strokeLocalLine(ctx, localPts, color, width) {
     ctx.stroke();
 }
 
-// Blue centre line plus a purple line for each wingtip (the route shifted
-// sideways by half the wingspan).
 function drawRoute(ctx) {
     if (routePoints.length < 2) return;
 
@@ -2894,7 +2683,6 @@ function drawRoute(ctx) {
         const dy = b.y - a.y;
         const len = Math.hypot(dx, dy) || 1;
 
-        // Unit vector to the right of the direction of travel.
         const nx = dy / len;
         const ny = -dx / len;
         const p = routePoints[i];
@@ -2904,7 +2692,6 @@ function drawRoute(ctx) {
     }
 
     ctx.save();
-
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
@@ -2915,12 +2702,7 @@ function drawRoute(ctx) {
     ctx.restore();
 }
 
-// The aircraft texture, true-to-scale, laid flat on the ground at the stop
-// (projected through the real camera) and rotated to the stop's heading.
-// Only the aircraft part of the image (empty margins cropped away) is used,
-// and it is scaled so its length equals the real aircraft length.
 // Copy of a texture coloured with `color` (keeps the aircraft's details), cached per colour.
-
 function tintedTexture(tex, color) {
     tex.tints = tex.tints || {};
 
@@ -2934,8 +2716,6 @@ function tintedTexture(tex, color) {
     const g = c.getContext("2d");
     g.drawImage(tex.img, k.x, k.y, k.w, k.h, 0, 0, k.w, k.h);
 
-    // Pictures with a solid (non-transparent) background: remove the
-    // background first so only the aircraft gets coloured, not a rectangle.
     if (k.bg) {
         try {
             const data = g.getImageData(0, 0, k.w, k.h);
@@ -2951,10 +2731,6 @@ function tintedTexture(tex, color) {
     g.globalAlpha = TEXTURE_TINT_ALPHA;
     g.fillStyle = color;
     g.fillRect(0, 0, k.w, k.h);
-
-    // The drawings are thin lines that get shrunk a lot on screen, so they
-    // turn faint and dotted. Draw the coloured copy slightly offset in all
-    // directions to make the lines thicker (and the colour solid).
 
     let out = c;
     const r = TEXTURE_LINE_BOOST * Math.max(k.w, k.h) / 320;
@@ -2972,7 +2748,6 @@ function tintedTexture(tex, color) {
             }
         }
         o.drawImage(c, 0, 0);
-
     }
 
     tex.tints[color] = out;
@@ -3002,11 +2777,9 @@ function drawGhostPlane(ctx, geo, alt, heading, alpha, state) {
     const nose = planeNose();
     const lengthIsWidth = !!tex && (nose === 90 || nose === 270);
 
-    // Length of the aircraft in image pixels (cropped area only).
     let unitsLen;
     if (outline) unitsLen = 1000;
     else if (tex) unitsLen = lengthIsWidth ? tex.crop.w : tex.crop.h;
-
     else unitsLen = 120;
 
     const m = planeLength() / unitsLen;
@@ -3024,7 +2797,6 @@ function drawGhostPlane(ctx, geo, alt, heading, alpha, state) {
         c.x,
         c.y
     );
-
 
     ctx.translate(0, -(PLANE_PIVOT_FROM_NOSE - 0.5) * unitsLen);
 
@@ -3050,13 +2822,9 @@ function drawGhostPlane(ctx, geo, alt, heading, alpha, state) {
     return { x: c.x, y: c.y, ppm: Math.hypot(ex.x, ex.y) };
 }
 
-// Flat outline of an airliner, nose up, 1000 units long, centred on (0,0).
-// `lw` = line width in these units (so it stays ~2.5 screen pixels).
 function drawOutlineAircraft(ctx, color, spanRatio, lw) {
-    const k = spanRatio / 0.9;            // 1 = a typical airliner
+    const k = spanRatio / 0.9;
     const wx = function (x) { return x * k; };
-
-    // Right half, from the nose back to the tail.
 
     const R = [
         [45, -370],
@@ -3076,13 +2844,11 @@ function drawOutlineAircraft(ctx, color, spanRatio, lw) {
     ctx.lineWidth = lw;
     ctx.strokeStyle = color;
 
-
     ctx.beginPath();
     ctx.moveTo(0, -500);
     ctx.quadraticCurveTo(45, -470, R[0][0], R[0][1]);
     for (let i = 1; i < R.length; i++) ctx.lineTo(R[i][0], R[i][1]);
     for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(-R[i][0], R[i][1]);
-
     ctx.quadraticCurveTo(-45, -470, 0, -500);
     ctx.closePath();
 
@@ -3093,7 +2859,6 @@ function drawOutlineAircraft(ctx, color, spanRatio, lw) {
     ctx.restore();
     ctx.stroke();
 
-    // Engines
     ctx.beginPath();
     ctx.rect(wx(95), -150, 62, 115);
     ctx.rect(-wx(95) - 62, -150, 62, 115);
@@ -3108,7 +2873,6 @@ function drawFallbackAircraft(ctx, danger) {
     ctx.fillStyle = danger ? "rgba(255,50,50,.95)" : "rgba(230,235,240,.95)";
     ctx.strokeStyle = "rgba(20,25,30,.95)";
     ctx.lineWidth = 2;
-
 
     function poly(points) {
         ctx.beginPath();
@@ -3129,12 +2893,10 @@ function drawFallbackAircraft(ctx, danger) {
     ctx.fill();
     ctx.stroke();
 
-
     poly([[-7, -2], [-52, 17], [-55, 25], [-7, 17]]);
     poly([[7, -2], [52, 17], [55, 25], [7, 17]]);
     poly([[-6, 43], [-28, 54], [-25, 61], [0, 52]]);
     poly([[6, 43], [28, 54], [25, 61], [0, 52]]);
-
 
     ctx.restore();
 }
@@ -3174,20 +2936,17 @@ function drawPlannerText(ctx, width, height) {
     if (selecting) {
         text("CLICK TO ADD STOPS " + sideWord() + " THE AIRCRAFT — THEN PRESS READY  (" + modeName() + ")", height - 55,
             "bold 13px Arial", "rgba(255,255,255,.95)");
-        text("Wheel = rotate (Shift = fine)  •  Ctrl+wheel or [ ] = zoom  •  +/- = speed  •  N = stops/nonstop  •  , . = wait  •  S = save  •  Z / right-click = undo  •  R = reset heading  •  L = straight line  •  Enter = ready  •  Esc = cancel", height - 34,
+        text("E = edit (turning)  •  Wheel = rotate when Edit ON (Shift = fine)  •  Ctrl+wheel or [ ] = zoom  •  +/- = speed  •  N = stops/nonstop  •  , . = wait  •  C = collision advice  •  S = save  •  Z / right-click = undo  •  R = reset heading  •  L = straight line  •  Enter = ready  •  Esc = cancel", height - 34,
             "11px Arial", "rgba(255,255,255,.8)");
     } else if (stops.length || pushing) {
         text(modeName() + " ROUTE", height - 55, "bold 15px Arial", "rgba(255,255,255,.95)");
         text(TOGGLE_VIEW_KEY.toUpperCase() + " = next camera  •  1-8 = pick camera  •  +/- = speed  •  N = stops/nonstop  •  , . = wait  •  Esc = stop", height - 34,
             "12px Arial", "rgba(255,255,255,.8)");
-
     }
 
     if (collisionWarn) {
-        text("⚠ POSSIBLE COLLISION — SOMETHING IS IN THE WAY (RED)", 100, "bold 18px Arial", "#ff6b6b");
+        text("⚠ POSSIBLE OBSTACLE (ADVICE ONLY — YOU CAN STILL START)", 100, "bold 16px Arial", "#ffb74d");
     }
-
-    // North indicator.
 
     ctx.textAlign = "center";
     ctx.font = "bold 16px Arial";
@@ -3208,9 +2967,7 @@ function drawPlannerText(ctx, width, height) {
 // MOUSE / STOP EDITING
 // ============================================================
 
-// Shared by hover + click. Sets the hover preview; true when it is reachable.
 function planFromPoint(point) {
-
     if (!point || !startPosition) return false;
 
     const base = stops.length ? stops[stops.length - 1] : startPosition;
@@ -3232,7 +2989,6 @@ function planFromPoint(point) {
     if (!rebuildRoute()) {
         notify("CAN'T REACH THERE — MOVE CURSOR " + sideWord() + " " + where);
         return false;
-
     }
 
     return true;
@@ -3240,7 +2996,6 @@ function planFromPoint(point) {
 
 function plannerMouseMove(event) {
     if (!selecting) return;
-
 
     const point = getGroundPoint(event.clientX, event.clientY);
     if (!point) return;
@@ -3252,7 +3007,6 @@ function plannerMouseMove(event) {
     }
 }
 
-// Click = confirm the stop under the cursor and keep planning.
 function plannerClick(event) {
     if (!selecting) return;
 
@@ -3261,7 +3015,6 @@ function plannerClick(event) {
     if (!point) {
         notify("GROUND NOT FOUND — TRY AGAIN");
         return;
-
     }
 
     if (!planFromPoint(point)) return;
@@ -3285,7 +3038,6 @@ function undoStop() {
 
     finalHeading = stops.length ? stops[stops.length - 1].heading : startHeading;
 
-
     rebuildRoute();
     updateDistanceUI(routeTotalLength);
     updateHeadingUI();
@@ -3293,7 +3045,6 @@ function undoStop() {
 
     notify(stops.length ? stops.length + " STOP(S) LEFT" : "ALL STOPS REMOVED — CLICK " + sideWord() + " THE AIRCRAFT");
 }
-
 
 function clearStops() {
     if (!selecting) return;
@@ -3312,7 +3063,6 @@ function clearStops() {
 
 // The READY button: lock the plan in and start moving.
 function confirmReady() {
-
     if (!selecting) return;
 
     if (!stops.length) {
@@ -3337,8 +3087,6 @@ function confirmReady() {
 // START PLANNING MODE
 // ============================================================
 
-
-// forward = false: push back (Y).  forward = true: pull forward (T).
 function startPushbackMode(forward) {
     if (!ready) {
         notify("GeoFS IS STILL LOADING...");
@@ -3348,11 +3096,9 @@ function startPushbackMode(forward) {
     if (inMotion()) { stopPushback(); return; }
     if (selecting) { cancelSelection(); return; }
 
-
     enterPlanning(!!forward);
 }
 
-// Sets up the top-down planner from the aircraft's current position.
 function enterPlanning(forward) {
     const current = getPosition();
     if (!current) {
@@ -3367,6 +3113,7 @@ function enterPlanning(forward) {
     removeTug();
 
     towForward = forward;
+    editMode = false;          // turning is locked every time planning starts
     clearCollisionCache();
     collisionWarn = false;
 
@@ -3414,7 +3161,6 @@ function beginMovement() {
 
     if (!a || !a.rigidBody || typeof a.rigidBody.setLinearVelocity !== "function") {
         notify("ERROR: AIRCRAFT PHYSICS NOT FOUND");
-
         console.error("[Y Pushback] rigidBody.setLinearVelocity unavailable.");
         return;
     }
@@ -3445,32 +3191,26 @@ function beginMovement() {
     stopIndex = 0;
     pauseUntil = 0;
 
-    // Chase camera while moving; buttons / V / 1-8 switch angle.
     releaseToFreeCamera();
     notify(modeName() + " ACTIVE — " + stops.length + (stops.length === 1 ? " STOP" : " STOPS") +
         (nonstopMode ? " (NONSTOP)" : ""));
     updatePanel();
 }
 
-// Fastest the aircraft may turn (rad/s): the nose gear is dragged sideways by (turn rate x distance to the nose gear),
-// so a long aircraft has to turn more slowly than a short one.
 function maxYawRate() {
     const wheelbase = tugActive ? clamp(tugNoseOffset + planeLength() * 0.1, 12, planeLength() * 0.7) : Math.max(12, planeLength() * 0.44);
     return clamp(NOSE_SCRUB_SPEED_MS / wheelbase, 0.02, MAX_YAW_RATE);
 }
 
-// Speed limit for the bends ahead on the route, so the aircraft slows down for tight turns
-// (turn rate = speed / radius must stay below the allowed turn rate).
 function curveSpeedLimit(from, window) {
     let limit = Infinity;
     const w = maxYawRate();
 
-
     for (let d = 0; d <= window; d += 3) {
         const t0 = getRouteTangent(Math.min(routeTotalLength, from + d));
         const t1 = getRouteTangent(Math.min(routeTotalLength, from + d + 4));
-        const ang = Math.acos(clamp(t0.x * t1.x + t0.y * t1.y, -1, 1));   // direction change over 4 m
-        const k = ang / 4;                                                  // curvature (1 / radius)
+        const ang = Math.acos(clamp(t0.x * t1.x + t0.y * t1.y, -1, 1));
+        const k = ang / 4;
 
         if (k > 0.004) limit = Math.min(limit, w / k);
     }
@@ -3481,7 +3221,6 @@ function curveSpeedLimit(from, window) {
 // Runs from the render loop, so it must never throw.
 function updatePushback() {
     try {
-
         updatePushbackInner();
         frameErrors = 0;
     } catch (e) {
@@ -3498,7 +3237,6 @@ function updatePushback() {
 function updatePushbackInner() {
     if (!pushing || !stops.length || !routePoints.length) return;
 
-    // Tug is still driving in / hooking up: the aircraft waits (see updateTugSequence).
     if (tugPhase !== "none" && tugPhase !== "push") return;
 
     releaseBrakes();
@@ -3515,12 +3253,9 @@ function updatePushbackInner() {
 
     updateTugSteer(dt);
 
-    // Measured ground speed.
-
     if (lastMoveSample) {
         const mdt = (nowT - lastMoveSample.t) / 1000;
         if (mdt > 0.001) {
-
             measuredSpeed = lerp(measuredSpeed, distance(lastMoveSample.p, current) / mdt, 0.1);
         }
     }
@@ -3548,7 +3283,6 @@ function updatePushbackInner() {
         return;
     }
 
-    // Reached the stop we are heading to?
     let remToStop = stopEnds[stopIndex] - routeProgress;
 
     if (
@@ -3560,29 +3294,24 @@ function updatePushbackInner() {
         stopIndex++;
 
         if (nonstopMode) {
-            // Nonstop: drive straight through, no pause.
             notify("PASSING STOP " + stopIndex + " — NONSTOP");
             remToStop = stopEnds[stopIndex] - routeProgress;
         } else if (waitSeconds > 0) {
             pauseUntil = nowT + waitSeconds * 1000;
             notify("STOP " + stopIndex + " REACHED — WAITING " + waitSeconds + " s");
             driveVelocity(0, 0, dt);
-
             currentSpeed = 0;
             return;
         } else {
-            // Stops mode with 0 s wait: no pause, carry on.
             notify("STOP " + stopIndex + " REACHED");
             remToStop = stopEnds[stopIndex] - routeProgress;
         }
     }
 
-    // "Is it actually moving?" check.
     if (currentSpeed > 0.8 && measuredSpeed < 0.1) stallFrames++;
     else stallFrames = 0;
 
     if (stallFrames > 150) {
-        // Stuck (usually dragging the nose wheel sideways in a turn): ease off the turn and roll straight for a moment.
         stallFrames = 0;
         stallWarned = true;
         yawHoldUntil = nowT + 3000;
@@ -3603,22 +3332,17 @@ function updatePushbackInner() {
         return;
     }
 
-    // Smooth braking: speed follows v = sqrt(2 * a * distance) so the aircraft
-    // eases to a gentle stop at every stop, whatever the chosen speed.
-    // In nonstop mode only the LAST stop is braked for.
+    // Smooth braking: v = sqrt(2 * a * distance). In nonstop mode only the LAST stop is braked for.
     let desiredSpeed = speedSetting;
     const brakeDist = (nonstopMode && stopIndex < last) ? (routeTotalLength - routeProgress) : remToStop;
     const brakeSpeed = Math.sqrt(2 * BRAKE_DECEL * Math.max(0, brakeDist - STOP_DISTANCE));
 
-
     desiredSpeed = Math.min(desiredSpeed, Math.max(CREEP_SPEED, brakeSpeed));
 
-    // Slow down for tight bends (starts early enough to brake gently).
     const curveLimit = curveSpeedLimit(routeProgress, currentSpeed * currentSpeed / (2 * DECELERATION) + 8);
     desiredSpeed = Math.min(desiredSpeed, Math.max(CREEP_SPEED, curveLimit));
 
     desiredSpeed = clamp(desiredSpeed, Math.min(CREEP_SPEED, speedSetting), SPEED_MAX);
-
 
     if (currentSpeed < desiredSpeed) {
         currentSpeed = Math.min(desiredSpeed, currentSpeed + ACCELERATION * dt);
@@ -3648,8 +3372,6 @@ function updatePushbackInner() {
     let vx = dirX * currentSpeed;
     let vy = dirY * currentSpeed;
 
-    // Keep the motion generally in the travel direction (backward for pushback,
-    // forward for pull) relative to the nose.
     const tr = travelDir(getAircraftHeading());
 
     const rearX = tr.x;
@@ -3660,7 +3382,6 @@ function updatePushbackInner() {
         vy = lerp(vy, rearY * currentSpeed, 0.65);
     }
 
-    // Move mostly along the fuselage, like a real pushback: the wheels roll instead of scrubbing sideways.
     if (BODY_AXIS_BLEND > 0) {
         vx = lerp(vx, rearX * currentSpeed, BODY_AXIS_BLEND);
         vy = lerp(vy, rearY * currentSpeed, BODY_AXIS_BLEND);
@@ -3670,12 +3391,7 @@ function updatePushbackInner() {
 
     driveVelocity(vx, vy, dt);
 
-
-    // The nose points along (pull) or opposite to (push) the direction of
-    // travel; the last metres before a stop use the heading chosen for that stop
-    // (not at intermediate stops in nonstop mode, so the nose never snaps).
     let desiredHeading = stops[stopIndex].heading;
-
 
     if (remToStop > 3 || (nonstopMode && stopIndex < last)) {
         const ahead = getRouteTangent(
@@ -3683,11 +3399,9 @@ function updatePushbackInner() {
         );
         let bearing = degrees(Math.atan2(ahead.x, ahead.y));
 
-        // Beside the route? Turn the nose a little back towards it (the aircraft rolls along its own fuselage,
-        // so this is the only way it gets back onto the line - no sideways skidding / drifting).
         const onRoute = getRoutePointAtDistance(routeProgress);
         if (onRoute && CROSS_TRACK_GAIN > 0) {
-            const sideErr = (localCurrent.x - onRoute.x) * tangent.y - (localCurrent.y - onRoute.y) * tangent.x;   // + = right of the route
+            const sideErr = (localCurrent.x - onRoute.x) * tangent.y - (localCurrent.y - onRoute.y) * tangent.x;
             bearing -= clamp(degrees(Math.atan2(CROSS_TRACK_GAIN * sideErr, currentSpeed + 1)), -25, 25);
         }
 
@@ -3701,8 +3415,6 @@ function updatePushbackInner() {
 // YAW — turns the aircraft so its nose follows the route.
 // ------------------------------------------------------------
 
-// GeoFS 3.9 and 4.0 accept yaw commands differently, so several methods are
-// tried in turn. The first one that really turns the aircraft is kept.
 const YAW_METHODS = ["angular velocity", "angular velocity property", "torque", "direct heading"];
 let yawMethod = 0;
 let yawLocked = false;
@@ -3720,16 +3432,12 @@ function resetYawControl() {
     yawLastErr = 0;
     yawBadFrames = 0;
     yawIdleFrames = 0;
-
-
     yawNoResp = 0;
     yawGoodFrames = 0;
     measuredOmega = 0;
     yawWarned = false;
-    // yawMethod / yawLocked are kept on purpose: a method that worked keeps being used.
 }
 
-// Heading from every source we know (so one stale source can't fool the check).
 function headingProbes() {
     const out = [getAircraftHeading()];
     try {
@@ -3738,13 +3446,11 @@ function headingProbes() {
             let h = a.htr[0];
             if (Math.abs(h) <= Math.PI * 2.5) h = h * 180 / Math.PI;
             out.push(normalizeAngle(h));
-
         }
     } catch (e) {}
     return out;
 }
 
-// Prints what this GeoFS build offers, so unknown builds can be diagnosed.
 function dumpYawDiag() {
     if (yawDiagDone) return;
     yawDiagDone = true;
@@ -3771,9 +3477,7 @@ function dumpYawDiag() {
 window.ypbDiag = function () { yawDiagDone = false; dumpYawDiag(); };
 
 function advanceYawMethod(reason) {
-
     dumpYawDiag();
-
 
     yawMethod = (yawMethod + 1) % YAW_METHODS.length;
     if (yawMethod === 0) yawCycles++;
@@ -3786,7 +3490,6 @@ function advanceYawMethod(reason) {
     console.log("[Y Pushback] Yaw: " + reason + " -> trying method \"" + YAW_METHODS[yawMethod] + "\"");
 }
 
-// rate = rad/s as sent to the aircraft (already multiplied by yawSign).
 function setYawRate(rate, dt) {
     if (!isFinite(rate)) rate = 0;
 
@@ -3796,7 +3499,6 @@ function setYawRate(rate, dt) {
 
     const rb = a.rigidBody;
 
-    // Always make sure a "stop" really stops the spinning.
     if (rate === 0) {
         try { if (typeof rb.setAngularVelocity === "function") rb.setAngularVelocity([0, 0, 0]); } catch (e) {}
     }
@@ -3823,9 +3525,7 @@ function setYawRate(rate, dt) {
                 return ok;
             }
 
-
             case 2: {
-
                 const fn = rb.applyTorque || rb.applyTorqueLocal;
                 if (typeof fn !== "function") return false;
 
@@ -3835,16 +3535,14 @@ function setYawRate(rate, dt) {
                 let torque = (rate - measuredOmega) * inertia * 2;
                 const lim = inertia * 0.4;
                 torque = clamp(torque, -lim, lim);
-                if (Math.abs(measuredOmega) > 0.5) torque = 0;   // safety: never spin up
+                if (Math.abs(measuredOmega) > 0.5) torque = 0;
 
                 fn.call(rb, [0, 0, torque]);
                 return true;
             }
 
             case 3: {
-                // Last resort: write the heading ourselves.
                 if (!Array.isArray(a.htr) || typeof a.htr[0] !== "number" || !dt) return false;
-
 
                 const cur = getAircraftHeading();
                 const hv = a.htr[0];
@@ -3866,7 +3564,6 @@ function applyYaw(desiredHeading, dt) {
     const h = getAircraftHeading();
     dt = dt > 0 ? dt : 0.016;
 
-    // Blend the wanted heading so the nose never snaps to a new direction.
     if (smoothTarget === null) smoothTarget = h;
     smoothTarget = normalizeAngle(
         smoothTarget + angleDifference(desiredHeading, smoothTarget) * (1 - Math.exp(-dt / YAW_TARGET_SMOOTH_S))
@@ -3874,10 +3571,7 @@ function applyYaw(desiredHeading, dt) {
 
     const err = angleDifference(smoothTarget, h);
 
-
-    // ---- Did the last command make the aircraft turn? ----
     const probes = headingProbes();
-
 
     if (yawLastProbe && Math.abs(yawLastErr) > 4) {
         let dh = 0;
@@ -3897,7 +3591,6 @@ function applyYaw(desiredHeading, dt) {
             } else {
                 yawBadFrames = Math.max(0, yawBadFrames - 1);
                 if (++yawGoodFrames >= 30 && !yawLocked) {
-
                     yawLocked = true;
                     console.log("[Y Pushback] Yaw method \"" + YAW_METHODS[yawMethod] + "\" works — keeping it.");
                 }
@@ -3927,23 +3620,18 @@ function applyYaw(desiredHeading, dt) {
 
     let rate = clamp(radians(err) * YAW_GAIN, -yawCap, yawCap);
 
-    // The turning rate itself changes gradually (no sudden twitch of the nose).
     const maxStep = MAX_YAW_ACCEL * dt;
     rate = clamp(rate, smoothYawRate - maxStep, smoothYawRate + maxStep);
 
     smoothYawRate = rate;
 
-    // Recovery: after getting stuck, stop turning for a moment and just roll straight.
     if (performance.now() < yawHoldUntil) rate = 0;
 
-    // Method unavailable on this build: skip straight to the next one.
     if (!setYawRate(rate * yawSign, dt) && !yawLocked) {
         advanceYawMethod("method not available");
     }
 }
 
-// Sends a velocity to the aircraft, blended over VELOCITY_SMOOTH_S so speed and
-// direction never jump from one frame to the next.
 function driveVelocity(tx, ty, dt) {
     const k = 1 - Math.exp(-dt / VELOCITY_SMOOTH_S);
     smoothVel.x += (tx - smoothVel.x) * k;
@@ -3954,7 +3642,6 @@ function driveVelocity(tx, ty, dt) {
 function setVelocity(x, y) {
     const a = aircraft();
     if (!a || !a.rigidBody) return;
-
 
     try {
         a.rigidBody.setLinearVelocity([x, y, 0]);
@@ -3967,14 +3654,12 @@ function setVelocity(x, y) {
 // FINISH / STOP / CANCEL
 // ============================================================
 
-// While moving: switch from the planner to the chase camera.
 function releaseToFreeCamera() {
     if (plannerCanvas) {
         plannerCanvas.style.pointerEvents = "none";
         plannerCanvas.style.cursor = "default";
     }
     document.body.style.cursor = "default";
-
 
     setCameraMode("chase");
 }
@@ -4007,7 +3692,6 @@ function finishPushback() {
     } else {
         finishTimer = setTimeout(function () {
             finishTimer = null;
-
             leaveTopView();
         }, 1000);
     }
@@ -4037,7 +3721,6 @@ function stopPushback() {
 
     leaveTopView();
     console.log("[Y Pushback] Stopped.");
-
 }
 
 function cancelSelection() {
@@ -4060,7 +3743,6 @@ function cancelSelection() {
 // KEYS
 // ============================================================
 
-
 function typingInField() {
     const el = document.activeElement;
     const tag = el && el.tagName;
@@ -4077,7 +3759,6 @@ function typingInField() {
 document.addEventListener(
     "keydown",
     function (event) {
-
         const k = event.key.toLowerCase();
         if (k !== "y" && k !== "t") return;
         if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -4088,7 +3769,6 @@ document.addEventListener(
     },
     true
 );
-
 
 // Speed: + / = faster, - / _ slower (while planning or moving).
 document.addEventListener(
@@ -4110,7 +3790,7 @@ document.addEventListener(
     true
 );
 
-// N = toggle Stops / Nonstop, "," = shorter wait, "." = longer wait (while planning or moving).
+// N = toggle Stops / Nonstop, "," = shorter wait, "." = longer wait.
 document.addEventListener(
     "keydown",
     function (event) {
@@ -4128,17 +3808,15 @@ document.addEventListener(
         } else if (event.key === ".") {
             event.preventDefault();
             event.stopPropagation();
-
             changeWait(WAIT_STEP);
         }
     },
     true
 );
 
-// Zoom the top view: ] = closer, [ = further away (planning, or top camera while moving).
+// Zoom the top view: ] = closer, [ = further away.
 document.addEventListener(
     "keydown",
-
     function (event) {
         if (!(selecting || (inMotion() && overheadActive)) || typingInField()) return;
         if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -4165,7 +3843,6 @@ document.addEventListener(
 
         const k = event.key.toLowerCase();
 
-
         if (k === TOGGLE_VIEW_KEY) {
             event.preventDefault();
             event.stopPropagation();
@@ -4179,14 +3856,14 @@ document.addEventListener(
                 event.stopPropagation();
                 setCameraMode(CAMERA_ORDER[i]);
                 return;
-
             }
         }
     },
     true
 );
 
-// Planning keys: R = reset heading, Z / Backspace = undo, Enter = ready, S = save plan.
+// Planning keys: E = edit (turning), C = collision advice, R = reset heading,
+// Z / Backspace = undo, L = straight, S = save plan, Enter = ready.
 document.addEventListener(
     "keydown",
     function (event) {
@@ -4208,6 +3885,14 @@ document.addEventListener(
             event.preventDefault();
             event.stopPropagation();
             toggleStraight();
+        } else if (k === "e") {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleEdit();
+        } else if (k === "c") {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleCollision();
         } else if (k === "s") {
             event.preventDefault();
             event.stopPropagation();
@@ -4217,7 +3902,6 @@ document.addEventListener(
             event.stopPropagation();
             confirmReady();
         }
-
     },
     true
 );
@@ -4230,7 +3914,6 @@ document.addEventListener(
         if (savedOpen()) closeSaved();
         else if (selecting) cancelSelection();
         else if (inMotion()) stopPushback();
-
     },
     true
 );
@@ -4238,104 +3921,76 @@ document.addEventListener(
 // ============================================================
 // PUSHBACK TUG  (3D tug model attached to the aircraft's nose gear)
 // ============================================================
-//
 // The tug models and the per-aircraft nose-gear positions come from the
 // GeoFS-Pushback project by TotallyRealElonMusk (loaded from GitHub).
 
-const SHOW_TUG = true;               // false = no tug at all
+const SHOW_TUG = true;
 
-
-// Which way the tug faces relative to the aircraft's nose.
-//   0   = same orientation as in the original GeoFS-Pushback script
-//         (tug facing away from the plane)
-//   180 = turned the other way round
-// If the tug looks backwards while it is hooked up, flip this between 0 and 180.
-// The driving in (backs in, hook-up end first) and driving off (free end first) follow
-// automatically, whichever value you pick.
-// If it swings the wrong way in curves, set TUG_STEER_FLIP below to true.
 const TUG_YAW_DEG = 0;
-
-// Aircraft that are not in the GeoFS-Pushback table: use a rough estimate
-// (tug about 30% of the aircraft length ahead of the reference point).
 const TUG_FALLBACK_ESTIMATE = true;
 
-// The tug steers: it swings round its hitch on the nose gear, so in a curve
-// it points where the nose wheel is really going (like a real pushback).
 const TUG_STEER = true;
-const TUG_STEER_FLIP = false;        // tug swings the WRONG way in curves? set true
-const TUG_MAX_STEER_DEG = 65;        // most the tug may turn relative to the aircraft
-const TUG_STEER_SMOOTH_S = 0.35;     // seconds: how softly the tug swings (higher = lazier)
-const TUG_CLEAR_RADIUS_M = 8;        // the collision check ignores this area around the tug (it is not an obstacle)
+const TUG_STEER_FLIP = false;
+const TUG_MAX_STEER_DEG = 65;
+const TUG_STEER_SMOOTH_S = 0.35;
+const TUG_CLEAR_RADIUS_M = 8;
 
-// Connect / disconnect routine:
-//   1. the tug drives in from the gate and hooks up, the aircraft waits (brake on)
-//   2. the push / pull
-//   3. aircraft is locked (brake on) while the tug stays hooked up for a few seconds
-//   4. the tug unhooks and drives back to where it started (the gate)
-
-const TUG_SEQUENCE = true;           // false = the tug just appears / disappears with the push
-const TUG_DRIVE_SPEED = 5;           // m/s the tug drives in and out
-const TUG_CONNECT_WAIT_S = 3;        // seconds the tug sits hooked up before the push starts
-const TUG_DISCONNECT_WAIT_S = 5;     // seconds the tug stays hooked up (aircraft locked) after the push ends
-const TUG_HOME_SIDE_M = 16;          // the tug's parking spot: this far to the right of the nose line (keep >= 6) ...
-const TUG_TURN_CLEAR_M = 11;         // ... the tug turns round this far ahead of the nose, then backs straight onto the nose gear
-const TUG_HOME_LEADIN_M = 22;        // ... and is parked this much further ahead of that turn, facing the aircraft
-const TUG_LEAVE_STRAIGHT_M = 10;     // driving off: straight ahead of the nose gear first ...
-
-const TUG_LEAVE_TURN_M = 7;          // ... then a 90 degree turn away to the right with this radius ...
-const TUG_LEAVE_OUT_M = 20;          // ... then straight on this far, and the tug is gone
-const TUG_GROUND_OFFSET_M = 0;       // tug sits too high (+) / too low (-) on the ground? adjust (or use the Tug buttons)
-const TUG_PITCH_COMPENSATION = true; // keeps the tug on the ground when the aircraft pitches while the tug is away from the nose gear
+const TUG_SEQUENCE = true;
+const TUG_DRIVE_SPEED = 5;
+const TUG_CONNECT_WAIT_S = 3;
+const TUG_DISCONNECT_WAIT_S = 5;
+const TUG_HOME_SIDE_M = 16;
+const TUG_TURN_CLEAR_M = 11;
+const TUG_HOME_LEADIN_M = 22;
+const TUG_LEAVE_STRAIGHT_M = 10;
+const TUG_LEAVE_TURN_M = 7;
+const TUG_LEAVE_OUT_M = 20;
+const TUG_GROUND_OFFSET_M = 0;
+const TUG_PITCH_COMPENSATION = true;
 const TUG_STORE_KEY = "ypb_tug_tune_v1";
 const TUG_STEER_KEY = "ypb_tug_steer_opposite_v4";
-// While pushing in a curve the tug swings the OPPOSITE way to what it did before (like a real tug: the nose gear
-// goes one way while the tail swings the other). Toggle it any time with the "Steer" button.
-const TUG_STEER_OPPOSITE = false;         // pushing back (tail first)
-const TUG_STEER_OPPOSITE_PULL = false;    // pulling forward: the tug simply follows the way the aircraft goes
-// Per-aircraft tug position (metres from the aircraft reference point). Matched against the aircraft name.
-// forward = where the nose gear / hitch is, up = height of the tug's base (negative = below the reference point).
-// Example:  "767-400": { forward: 26.9 }
+const TUG_STEER_OPPOSITE = false;
+const TUG_STEER_OPPOSITE_PULL = false;
+// Per-aircraft tug position, e.g.  "767-400": { forward: 26.9 }
 const TUG_OVERRIDES = {};
-const TUG_RETRACE_PUSH = true;       // after a pushback the tug drives back the SAME WAY the push went (smoothed), then on to its base
-const TUG_RETURN_SPEED = 6;          // m/s the tug drives back to base
-const TUG_RETURN_TO_BASE = true;     // after unhooking the tug drives back to where it started (false = short exit only)
-const TUG_RETURN_MAX_M = 250;        // ... but is removed after this much driving (keeps it close enough to stay level on the ground)
-const TUG_REVERSE_SPEED = 1.8;       // m/s while backing onto the nose gear
-const TUG_TURN_PAUSE_S = 0.8;        // short pause between the turn and backing up
-const TUG_OFFSET_IN_TUG_FRAME = false; // tug slides in the wrong direction while driving? try true
-const TUG_FREE_AFTER_M = 10;         // aircraft is released once the tug has driven this far away (brake stays on)
+const TUG_RETRACE_PUSH = true;
+const TUG_RETURN_SPEED = 6;
+const TUG_RETURN_TO_BASE = true;
+const TUG_RETURN_MAX_M = 250;
+const TUG_REVERSE_SPEED = 1.8;
+const TUG_TURN_PAUSE_S = 0.8;
+const TUG_OFFSET_IN_TUG_FRAME = false;
+const TUG_FREE_AFTER_M = 10;
 
 const TUG_DATA_BASE = "https://raw.githubusercontent.com/TotallyRealElonMusk/GeoFS-Pushback/main/pushback%20data/";
 const TUG_MODEL_HOST = "https://raw.githubusercontent.com/";
 
-let tugInfo = null;      // aircraft id -> { pos: [right, forward, up], model: "com" | "mil" | "carrier" }
-let tugModels = null;    // model key   -> path of the .glb file
+let tugInfo = null;
+let tugModels = null;
 let tugActive = false;
-let tugSteerDeg = 0;         // current tug angle relative to the aircraft (deg, + = clockwise seen from above)
-let tugOmega = 0;            // smoothed turning rate of the aircraft (rad/s, + = nose turning right)
+let tugSteerDeg = 0;
+let tugOmega = 0;
 let tugLastHeading = null;
 let tugSourceText = "";
-let tugSteerInvert = true;  // swing the tug the opposite way in curves
-let tugBaseForward = 12;     // nose gear position before tuning
-let tugCurX = 0;             // current tug offset to the right of the hitch
-let tugRight0 = 0;           // sideways position of the hitch from the aircraft reference point
-let tugGroundDelta = 0;      // smoothed ground height difference between the tug and the hitch
-let tugCurY = 0;             // current tug offset ahead of the hitch (for pitch compensation)
-let tugGearHist = [];        // recent positions of the nose gear (for its real direction of travel)
-let tugNoseOffset = 12;      // metres from the aircraft reference point to the nose gear / hitch
-let tugSteerSign = -1;       // sign of the "rotate Z" animation that turns something clockwise
+let tugSteerInvert = true;
+let tugBaseForward = 12;
+let tugCurX = 0;
+let tugRight0 = 0;
+let tugGroundDelta = 0;
+let tugCurY = 0;
+let tugGearHist = [];
+let tugNoseOffset = 12;
+let tugSteerSign = -1;
 
 let tugPhase = "none";       // none | approach | connect | push | hold | leave
-let tugPhaseT = 0;           // seconds spent in this phase
+let tugPhaseT = 0;
 let tugSeqLast = 0;
-let tugHome = null;          // {lat, lon}: where the tug is parked at the gate
-let tugPath = null;          // current driving path {pts, cum, len, dur}
-let tugPath2 = null;         // the backing-up path (approach, second leg)
-let tugLeg = 0;              // approach: 0 = driving in + turning, 1 = short pause, 2 = backing up
-
-
-let tugAfter = null;         // runs when the tug has left
-let tugTrail = [];           // where the hitch has been during the push (geo points), used to drive back the same way
+let tugHome = null;
+let tugPath = null;
+let tugPath2 = null;
+let tugLeg = 0;
+let tugAfter = null;
+let tugTrail = [];
 let tugLeaveYaw = 0;
 
 function loadTugData() {
@@ -4352,7 +4007,6 @@ function loadTugData() {
         .catch(function (e) { console.warn("[Y Pushback] Tug models could not be loaded:", e); });
 }
 
-// Where the tug sits and which model it uses for the aircraft being flown.
 // ---- Finding the nose gear (where the tug hooks on) ----
 
 function tripleOf(v) {
@@ -4366,7 +4020,6 @@ function tripleOf(v) {
     return null;
 }
 
-// Looks through the aircraft definition for the nose gear: [right, forward, up] from the aircraft reference point.
 function detectNoseGear() {
     const L = planeLength();
     const found = [];
@@ -4374,8 +4027,8 @@ function detectNoseGear() {
     function add(src, name, v, isNose) {
         const t = tripleOf(v);
         if (!t) return;
-        if (Math.abs(t[0]) > 1.5) return;                  // on the centre line only
-        if (!(t[1] > 2 && t[1] < L * 0.95)) return;        // sensible position ahead of the reference point
+        if (Math.abs(t[0]) > 1.5) return;
+        if (!(t[1] > 2 && t[1] < L * 0.95)) return;
         found.push({ src: src, name: name || "", right: t[0], forward: t[1], up: t[2], nose: !!isNose });
     }
 
@@ -4383,7 +4036,6 @@ function detectNoseGear() {
         const a = aircraft();
         const def = a.definition || {};
         const nosey = /nose|front|nlg|nwheel/i;
-
 
         [["suspensions", def.suspensions], ["suspensions", a.suspensions], ["wheels", def.wheels]].forEach(function (pair) {
             const list = pair[1];
@@ -4408,13 +4060,12 @@ function detectNoseGear() {
 
     if (!found.length) return null;
 
-    // Preferred: something called "nose / front"; otherwise the most forward point on the centre line.
     const named = found.filter(function (f) { return f.nose; });
     let pool = named;
 
     if (!pool.length) {
         const minUp = Math.min.apply(null, found.map(function (f) { return f.up; }));
-        pool = found.filter(function (f) { return f.up <= minUp + 1.0; });   // the gear is the lowest thing on the centre line
+        pool = found.filter(function (f) { return f.up <= minUp + 1.0; });
     }
 
     pool.sort(function (x, y) { return y.forward - x.forward; });
@@ -4423,8 +4074,6 @@ function detectNoseGear() {
     return best;
 }
 
-// Rough nose gear position from the cockpit camera position (same frame as the aircraft model):
-// the nose gear sits roughly 5% of the aircraft length behind the cockpit eye. Used to reject bad data.
 function noseGearEstimate() {
     try {
         const c = cockpitPosition(null);
@@ -4433,10 +4082,7 @@ function noseGearEstimate() {
     return null;
 }
 
-// Height of the aircraft reference point above the ground while parked (positive metres), or null.
-
 function referenceHeightAboveGround() {
-    // 1) GeoFS's own altitude and ground elevation (same ground GeoFS draws and uses for the wheels)
     try {
         const v = geofs.animation.values;
         if (typeof v.altitude === "number" && typeof v.groundElevationFeet === "number") {
@@ -4445,13 +4091,11 @@ function referenceHeightAboveGround() {
         }
     } catch (e) {}
 
-    // 2) the height the aircraft definition says it sits at on its wheels
     try {
         const sa = aircraft().definition.startAltitude;
         if (typeof sa === "number" && sa > 0.8 && sa < 12) return { v: sa, src: "startAltitude" };
     } catch (e) {}
 
-    // 3) the terrain under the aircraft
     try {
         const p = getPosition();
         const C = window.Cesium;
@@ -4475,7 +4119,6 @@ function tugOverrideFor() {
     return null;
 }
 
-// Where the tug sits and which model it uses for the aircraft being flown.
 function tugPlacement() {
     if (!tugModels) return null;
 
@@ -4485,13 +4128,10 @@ function tugPlacement() {
     if (!modelPath) return null;
 
     let right = 0;
-
     let forward = null;
     let up = null;
     const sources = [];
 
-    // Order: 1) per-aircraft override, 2) nose gear found in the aircraft definition, 3) the GeoFS-Pushback table,
-    // 4) estimate from the cockpit position, 5) plain guess. Values that are far from the cockpit-based estimate are rejected.
     const E = noseGearEstimate();
     const report = { aircraft: aircraftKey(), id: a.id, length: planeLength(), model: entry ? entry.model : "com (default)", table: entry ? entry.pos : null, cockpitEstimate: E, detected: null, override: tugOverrideFor() };
     const tol = Math.max(5, planeLength() * 0.1);
@@ -4528,7 +4168,6 @@ function tugPlacement() {
         sources.push("rough guess");
     }
 
-    // Height: put the base of the tug on the ground.
     let upSrc = "table / override";
     if (up === null || !ov || !Number.isFinite(ov.up)) {
         const h = referenceHeightAboveGround();
@@ -4536,7 +4175,6 @@ function tugPlacement() {
     }
     if (up === null) { up = -3.5; upSrc = "estimate"; }
     up += TUG_GROUND_OFFSET_M;
-
 
     report.chosen = { right: right, forward: forward, up: up, from: sources.join(" + "), height: upSrc };
     try { window.ypbTugLast = report; } catch (e) {}
@@ -4548,8 +4186,7 @@ function tugPlacement() {
 // ---- Tug tuning (saved per aircraft, adjusted with the Tug buttons) ----
 let tugTune = { forward: 0, up: 0 };
 
-// The steering preference is stored separately for pushing back and for pulling forward.
-function steerKey() { return (towForward ? TUG_STEER_KEY + "_pull" : TUG_STEER_KEY) + "_" + aircraftKey(); }   // saved per aircraft
+function steerKey() { return (towForward ? TUG_STEER_KEY + "_pull" : TUG_STEER_KEY) + "_" + aircraftKey(); }
 function steerDefault() { return towForward ? TUG_STEER_OPPOSITE_PULL : TUG_STEER_OPPOSITE; }
 
 function loadTugTune() {
@@ -4581,13 +4218,11 @@ function nudgeTug(key, delta) {
     notify("TUG " + (key === "forward" ? "FORWARD" : "HEIGHT") + " " + (tugTune[key] >= 0 ? "+" : "") + tugTune[key].toFixed(2) + " m (SAVED FOR THIS AIRCRAFT)");
 }
 
-// Copies the tug placement details of the current aircraft (to send when a plane's tug looks wrong).
 function copyTugReport() {
     const r = window.ypbTugLast;
     const text = r ? JSON.stringify(Object.assign({}, r, { tune: tugTune, steerFlipped: tugSteerInvert })) : "no tug report yet";
 
     function fallback() { try { window.prompt("Copy this tug report:", text); } catch (e) {} }
-
 
     try {
         navigator.clipboard.writeText(text).then(function () {
@@ -4611,11 +4246,8 @@ function resetTugTune() {
     notify("TUG POSITION RESET");
 }
 
-// Which sign of a "rotate Z" animation turns a part CLOCKWISE (seen from above)?
-// Read from the aircraft's own nose-wheel steering animation when it can be
-// found, otherwise assume the normal right-handed convention (-1).
 function detectTugSteerSign() {
-    let sign = 1;      // normal case: a positive turn angle turns the tug clockwise
+    let sign = 1;
     let source = "default";
 
     try {
@@ -4633,12 +4265,10 @@ function detectTugSteerSign() {
                 if (an && an.type === "rotate" && String(an.axis).toUpperCase() === "Z" &&
                     (an.value === "yaw" || an.value === "steering") &&
                     typeof an.ratio === "number" && an.ratio !== 0) {
-                    // yaw > 0 = steer right = clockwise
                     sign = Math.sign(an.ratio);
                     source = 'nose wheel part "' + part.name + '"';
                     break outer;
                 }
-
             }
         }
     } catch (e) {}
@@ -4649,10 +4279,7 @@ function detectTugSteerSign() {
     return sign;
 }
 
-
-// Runs every frame while pushing. The tug lines up with the direction the
-// nose gear is really moving: aircraft velocity plus the swing of the nose
-// caused by the aircraft turning.
+// Runs every frame while pushing. The tug lines up with the direction the nose gear is really moving.
 function updateTugSteer(dt) {
     if (!tugActive || !TUG_STEER) return;
 
@@ -4666,7 +4293,6 @@ function updateTugSteer(dt) {
     }
     tugLastHeading = h;
 
-    // Remember where the hitch (nose gear) has been, so the tug can drive back the same way.
     const pp = getPosition();
     if (pp) {
         const hh = radians(h);
@@ -4674,7 +4300,6 @@ function updateTugSteer(dt) {
         const lastPt = tugTrail[tugTrail.length - 1];
         if (!lastPt || distance(lastPt, hitch) >= 1.5) tugTrail.push(hitch);
 
-        // Where the nose gear really is, over the last moments (its true direction of travel).
         if (startPosition) {
             const gl = geoToLocal(startPosition, hitch);
             const tn = performance.now();
@@ -4684,13 +4309,10 @@ function updateTugSteer(dt) {
     }
 
     const hr = radians(h);
-    let vf = smoothVel.x * Math.sin(hr) + smoothVel.y * Math.cos(hr);   // along the nose (+ = forward)
-    let vr = smoothVel.x * Math.cos(hr) - smoothVel.y * Math.sin(hr);   // to the right of the nose
-    let vNoseRight = vr + tugOmega * tugNoseOffset;                      // nose gear moves sideways when the nose swings (estimate)
+    let vf = smoothVel.x * Math.sin(hr) + smoothVel.y * Math.cos(hr);
+    let vr = smoothVel.x * Math.cos(hr) - smoothVel.y * Math.sin(hr);
+    let vNoseRight = vr + tugOmega * tugNoseOffset;
 
-    // Better: use how the nose gear is REALLY moving (works the same for every aircraft, whatever its size or
-
-    // wherever its reference point is). The tug simply points the way the nose gear is going.
     if (tugGearHist.length >= 3) {
         const a0 = tugGearHist[0];
         const a1 = tugGearHist[tugGearHist.length - 1];
@@ -4704,10 +4326,8 @@ function updateTugSteer(dt) {
         }
     }
 
-
     let target = tugSteerDeg;
 
-    // Too slow (or waiting at a stop): the direction is unreliable, keep the last angle.
     if (Math.hypot(vf, vNoseRight) > 0.2) {
         const s = vf < 0 ? -1 : 1;
         target = clamp(degrees(Math.atan2(vNoseRight * s, Math.abs(vf))), -TUG_MAX_STEER_DEG, TUG_MAX_STEER_DEG);
@@ -4725,8 +4345,6 @@ function updateTugSteer(dt) {
 
 function smoothstep01(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
 
-// Position of a geo point in the aircraft's own frame, relative to the hitch.
-// x = to the right of the nose, y = ahead of the hitch (metres).
 function geoToHitchFrame(geo) {
     const p = getPosition();
 
@@ -4741,8 +4359,6 @@ function geoToHitchFrame(geo) {
     };
 }
 
-
-// Distance fraction after a fraction u of the drive time: gentle start, steady speed, gentle stop.
 function tugEase(u) {
     const f = 0.15;
     u = clamp(u, 0, 1);
@@ -4760,9 +4376,6 @@ function makeTugPath(pts) {
     return { pts: pts, cum: cum, len: len, dur: Math.max(1.5, len / (TUG_DRIVE_SPEED * 0.85)) };
 }
 
-
-// After a pushback: the way the nose gear went during the push, backwards, smoothed, and on to the base.
-// Returns null when there is no usable trail or the way back would cut through the aircraft.
 function buildTugRetracePath() {
     if (towForward || tugTrail.length < 4) return null;
 
@@ -4781,7 +4394,6 @@ function buildTugRetracePath() {
 
     if (raw.length < 6) return null;
 
-    // Smooth the wobbles of the recorded trail (two passes), keeping both ends.
     let pts = raw;
     for (let pass = 0; pass < 2; pass++) {
         const prev = pts;
@@ -4791,14 +4403,12 @@ function buildTugRetracePath() {
             for (let k = -3; k <= 3; k++) {
                 const j = i + k;
                 if (j < 0 || j >= prev.length) continue;
-
                 x += prev[j].x; y += prev[j].y; n++;
             }
             return { x: x / n, y: y / n };
         });
     }
 
-    // Stop after TUG_RETURN_MAX_M, and make sure the way back does not cut through the aircraft.
     const L = planeLength();
     const half = L * planeSpanRatio() / 2;
     const yMin = -(L * 0.88);
@@ -4816,9 +4426,6 @@ function buildTugRetracePath() {
     return out.length > 5 ? out : null;
 }
 
-// Path from the nose gear back to the tug's base (the spot it started from), in the hitch frame:
-// out ahead of the nose first, then smoothly to the base. If the base is behind the aircraft the tug
-// goes round the side, clear of the wings. Returns null when the base is too close / inside the aircraft.
 function buildTugReturnPath(home) {
     const L = planeLength();
     const half = L * planeSpanRatio() / 2 + 6;
@@ -4831,7 +4438,7 @@ function buildTugReturnPath(home) {
 
     if (Math.hypot(home.x, home.y) < 15 || inside(home.x, home.y)) return null;
 
-    const A = { x: 0, y: Math.max(S, yMax + 2) };      // out past the nose first
+    const A = { x: 0, y: Math.max(S, yMax + 2) };
     let blocked = false;
     const n = Math.max(2, Math.ceil(Math.hypot(home.x - A.x, home.y - A.y) / 2));
     for (let i = 0; i <= n; i++) {
@@ -4849,7 +4456,6 @@ function buildTugReturnPath(home) {
 
     way.push(home);
 
-    // Smooth curve through the waypoints (Catmull-Rom).
     const pts = [];
     for (let i = 0; i < way.length - 1; i++) {
         const p0 = way[Math.max(0, i - 1)], p1 = way[i], p2 = way[i + 1], p3 = way[Math.min(way.length - 1, i + 2)];
@@ -4862,7 +4468,6 @@ function buildTugReturnPath(home) {
         }
     }
 
-    // Stop after TUG_RETURN_MAX_M of driving.
     const out = [pts[0]];
     let len = 0;
     for (let i = 1; i < pts.length; i++) {
@@ -4874,7 +4479,6 @@ function buildTugReturnPath(home) {
     return out.length > 3 ? out : null;
 }
 
-// Point and heading (deg clockwise from the aircraft's nose) at distance d along the path.
 function tugPathAt(path, d) {
     d = clamp(d, 0, path.len);
 
@@ -4893,12 +4497,9 @@ function tugPathAt(path, d) {
         }
     }
 
-
     return { x: 0, y: 0, bearing: 0 };
-
 }
 
-// Applies the tug's position (relative to the hitch) and heading to the model.
 function setTugVisual(x, y, yawCwDeg) {
     let tx = x;
     let ty = y;
@@ -4920,7 +4521,6 @@ function setTugVisual(x, y, yawCwDeg) {
     } catch (e) {}
 }
 
-// Ground (terrain) height at a point, or null while the ground there is not loaded yet.
 function terrainHeightAt(lat, lon) {
     try {
         const h = geofs.api.viewer.scene.globe.getHeight(window.Cesium.Cartographic.fromDegrees(lon, lat));
@@ -4930,9 +4530,6 @@ function terrainHeightAt(lat, lon) {
     }
 }
 
-// Keeps the tug ON THE GROUND wherever it drives. The tug is fixed to the aircraft, so away from the nose gear it
-// rises / sinks when the aircraft pitches or rolls and when the ground is not perfectly level. This works out the
-// height needed from: the saved height tuning, the aircraft's pitch and roll, and the actual ground under the tug.
 function updateTugHeight() {
     if (!tugActive) return;
 
@@ -4942,11 +4539,9 @@ function updateTugHeight() {
         try {
             if (Math.abs(tugCurX) + Math.abs(tugCurY) > 0.3) {
                 const v = geofs.animation.values;
-                const th = radians(clamp(Number(v.atilt) || 0, -20, 20));      // pitch, nose up = +
-                const ph = radians(clamp(Number(v.aroll) || 0, -20, 20));      // roll, right wing down = +
+                const th = radians(clamp(Number(v.atilt) || 0, -20, 20));
+                const ph = radians(clamp(Number(v.aroll) || 0, -20, 20));
 
-
-                // Ground height under the tug compared with under the nose gear.
                 const p = getPosition();
                 const h = radians(getAircraftHeading());
                 const X0 = tugRight0;
@@ -4964,7 +4559,6 @@ function updateTugHeight() {
 
                 tugGroundDelta += (dg - tugGroundDelta) * 0.25;
 
-                // Height of a point that is (tugCurX, tugCurY) away from the hitch, in the tilted aircraft frame.
                 z += (tugGroundDelta - tugCurY * Math.sin(th) + tugCurX * Math.sin(ph) * Math.cos(th)) / (Math.cos(th) * Math.cos(ph));
             } else {
                 tugGroundDelta *= 0.8;
@@ -4975,14 +4569,12 @@ function updateTugHeight() {
     try { geofs.animation.values.ypbTugZ = z; } catch (e) {}
 }
 
-// Aircraft cannot move while the tug is hooking up / unhooking.
 function lockAircraft() {
     setVelocity(0, 0);
     setYawRate(0);
     setParkingBrake();
 }
 
-// The tug starts parked ahead of the nose at the gate, then drives to the nose gear.
 function startTugApproach() {
     tugPhase = "none";
 
@@ -4991,9 +4583,8 @@ function startTugApproach() {
     tugLeg = 0;
     if (!TUG_SEQUENCE || !startPosition) return;
 
-    // Hitch frame: x = right of the nose gear, y = ahead of it (metres).
-    const noseAhead = planeLength() * 0.12;   // nose gear -> nose tip (about 12% of the length on airliners)
-    const turnY = noseAhead + TUG_TURN_CLEAR_M;                         // where the turn ends / backing starts
+    const noseAhead = planeLength() * 0.12;
+    const turnY = noseAhead + TUG_TURN_CLEAR_M;
     const homeY = turnY + TUG_HOME_LEADIN_M;
 
     const homeX = TUG_HOME_SIDE_M;
@@ -5007,8 +4598,6 @@ function startTugApproach() {
         y: fwd * Math.cos(h) - right * Math.sin(h)
     });
 
-    // Leg A (nose first, FACING THE AIRCRAFT): drive towards the aircraft alongside the nose,
-    // then swing round in a half circle until the tug faces away, in line with the nose gear.
     const side = homeX >= 0 ? 1 : -1;
     const R = Math.max(2.5, Math.abs(homeX) / 2);
     const ax = Math.abs(homeX);
@@ -5024,7 +4613,6 @@ function startTugApproach() {
         legA.push({ x: side * (cx + R * Math.cos(phi)), y: turnY + R * Math.sin(phi) });
     }
 
-    // Leg B (BACKING UP): straight onto the nose gear, hook-up end first.
     const legB = [];
     const nB = Math.max(2, Math.ceil(turnY / 2));
     for (let i = 0; i <= nB; i++) legB.push({ x: 0, y: turnY - turnY * i / nB });
@@ -5044,8 +4632,6 @@ function startTugApproach() {
     lockAircraft();
     notify("TUG APPROACHING — " + tugSourceText);
 }
-
-// Pushing is over: the tug stays hooked up for a moment (aircraft locked), then leaves.
 
 function beginTugDisconnect() {
     tugPhase = "hold";
@@ -5068,7 +4654,6 @@ function updateTugSequence() {
     if (!tugActive || tugPhase === "none" || tugPhase === "push") return;
 
     try {
-
         const now = performance.now();
         const dt = clamp((now - (tugSeqLast || now)) / 1000, 0.001, 0.1);
         tugSeqLast = now;
@@ -5078,26 +4663,22 @@ function updateTugSequence() {
 
         if (tugPhase === "approach") {
             if (tugLeg === 0) {
-                // Driving forward (nose first, facing the aircraft), then turning round.
                 const u = tugPhaseT / tugPath.dur;
                 const pt = tugPathAt(tugPath, tugEase(u) * tugPath.len);
                 setTugVisual(pt.x, pt.y, normalizeAngle(pt.bearing));
 
                 if (u >= 1) { tugLeg = 1; tugPhaseT = 0; }
             } else if (tugLeg === 1) {
-                // Stopped for a moment, now facing away from the aircraft.
                 const e = tugPath.pts[tugPath.pts.length - 1];
                 setTugVisual(e.x, e.y, 0);
 
                 if (tugPhaseT >= TUG_TURN_PAUSE_S) { tugLeg = 2; tugPhaseT = 0; notify("TUG BACKING UP TO THE NOSE GEAR"); }
             } else {
-                // Backing up, hook-up end first, straight onto the nose gear.
                 const u = tugPhaseT / tugPath2.dur;
                 const pt = tugPathAt(tugPath2, tugEase(u) * tugPath2.len);
                 setTugVisual(pt.x, pt.y, normalizeAngle(pt.bearing + 180));
 
                 if (u >= 1) {
-
                     tugPhase = "connect";
                     tugPhaseT = 0;
                     tugSteerDeg = 0;
@@ -5117,47 +4698,43 @@ function updateTugSequence() {
             }
         } else if (tugPhase === "hold") {
             if (tugPhaseT >= TUG_DISCONNECT_WAIT_S) {
-                // Drive off like a real tug, free end first (never backwards).
                 const homeH = (TUG_RETURN_TO_BASE && tugHome) ? geoToHitchFrame(tugHome) : null;
-                let pts = (TUG_RETURN_TO_BASE && TUG_RETRACE_PUSH) ? buildTugRetracePath() : null;   // same way as the push
-                if (!pts && homeH) pts = buildTugReturnPath(homeH);     // otherwise round the aircraft to the base
-                const quick = !pts;                                      // otherwise a short exit
+                let pts = (TUG_RETURN_TO_BASE && TUG_RETRACE_PUSH) ? buildTugRetracePath() : null;
+                if (!pts && homeH) pts = buildTugReturnPath(homeH);
+                const quick = !pts;
                 if (quick) pts = [];
                 const sd = TUG_HOME_SIDE_M >= 0 ? 1 : -1;
                 const S = TUG_LEAVE_STRAIGHT_M;
 
                 if (quick) {
-                const nS = Math.max(2, Math.ceil(S / 2));
-                for (let i = 0; i <= nS; i++) pts.push({ x: 0, y: S * i / nS });
+                    const nS = Math.max(2, Math.ceil(S / 2));
+                    for (let i = 0; i <= nS; i++) pts.push({ x: 0, y: S * i / nS });
 
-                if (towForward) {
-                    // Pull forward: carry on ahead, swing round in a half circle and head back, away from the wings.
-                    const R = TUG_LEAVE_TURN_M;
-                    const Sf = S + 4;
-                    pts.push({ x: 0, y: Sf });
-                    for (let i = 1; i <= 36; i++) {
-                        const th = Math.PI * i / 36;                       // 0 .. 180 degrees
-                        pts.push({ x: sd * R * (1 - Math.cos(th)), y: Sf + R * Math.sin(th) });
+                    if (towForward) {
+                        const R = TUG_LEAVE_TURN_M;
+                        const Sf = S + 4;
+                        pts.push({ x: 0, y: Sf });
+                        for (let i = 1; i <= 36; i++) {
+                            const th = Math.PI * i / 36;
+                            pts.push({ x: sd * R * (1 - Math.cos(th)), y: Sf + R * Math.sin(th) });
+                        }
+                        const bx = sd * 2 * R, by = Sf;
+                        const ang = radians(140);
+                        const nB = Math.max(2, Math.ceil(TUG_LEAVE_OUT_M / 2));
+                        for (let i = 1; i <= nB; i++) {
+                            const d = TUG_LEAVE_OUT_M * i / nB;
+                            pts.push({ x: bx + sd * Math.sin(ang) * d, y: by + Math.cos(ang) * d });
+                        }
+                    } else {
+                        const R = TUG_LEAVE_TURN_M;
+                        for (let i = 1; i <= 24; i++) {
+                            const ang = (Math.PI / 2) * i / 24;
+                            pts.push({ x: sd * R * (1 - Math.cos(ang)), y: S + R * Math.sin(ang) });
+                        }
+                        const ex = sd * R, ey = S + R;
+                        const nO = Math.max(2, Math.ceil(TUG_LEAVE_OUT_M / 2));
+                        for (let i = 1; i <= nO; i++) pts.push({ x: ex + sd * TUG_LEAVE_OUT_M * i / nO, y: ey });
                     }
-                    const bx = sd * 2 * R, by = Sf;
-                    const ang = radians(140);                              // heading back and outwards
-                    const nB = Math.max(2, Math.ceil(TUG_LEAVE_OUT_M / 2));
-                    for (let i = 1; i <= nB; i++) {
-                        const d = TUG_LEAVE_OUT_M * i / nB;
-                        pts.push({ x: bx + sd * Math.sin(ang) * d, y: by + Math.cos(ang) * d });
-                    }
-                } else {
-                    // Pushback: forward, a 90 degree turn away to the side, then out.
-
-                    const R = TUG_LEAVE_TURN_M;
-                    for (let i = 1; i <= 24; i++) {
-                        const ang = (Math.PI / 2) * i / 24;                // 0 .. 90 degrees
-                        pts.push({ x: sd * R * (1 - Math.cos(ang)), y: S + R * Math.sin(ang) });
-                    }
-                    const ex = sd * R, ey = S + R;
-                    const nO = Math.max(2, Math.ceil(TUG_LEAVE_OUT_M / 2));
-                    for (let i = 1; i <= nO; i++) pts.push({ x: ex + sd * TUG_LEAVE_OUT_M * i / nO, y: ey });
-                }
                 }
 
                 tugPath = makeTugPath(pts);
@@ -5172,16 +4749,13 @@ function updateTugSequence() {
             const dist = tugEase(u) * tugPath.len;
             const pt = tugPathAt(tugPath, dist);
 
-            // Aircraft stays locked until the tug is clear of it (the parking brake stays on).
             if (dist < TUG_FREE_AFTER_M) lockAircraft();
 
-            // Point the cab where the path goes a few metres further on, turning no faster than 90 deg/s.
             const ahead = tugPathAt(tugPath, Math.min(tugPath.len, dist + 4));
             const bearing = Math.hypot(ahead.x - pt.x, ahead.y - pt.y) > 0.2
-
                 ? degrees(Math.atan2(ahead.x - pt.x, ahead.y - pt.y))
                 : pt.bearing;
-            const want = normalizeAngle(bearing);   // drives off with the end that was NOT hooked to the aircraft leading
+            const want = normalizeAngle(bearing);
             tugLeaveYaw = normalizeAngle(tugLeaveYaw + clamp(angleDifference(want, tugLeaveYaw), -120 * dt, 120 * dt));
 
             setTugVisual(pt.x, pt.y, tugLeaveYaw);
@@ -5199,7 +4773,6 @@ function addTug() {
     if (!SHOW_TUG) return;
 
     try {
-
         const place = tugPlacement();
 
         if (!place) {
@@ -5232,14 +4805,13 @@ function addTug() {
             position: place.pos,
             rotation: [0, 0, TUG_YAW_DEG],
             animations: [
-                { type: "translate", value: "ypbTugX", axis: "X", ratio: 1 },  // driving in / out (metres, aircraft frame)
+                { type: "translate", value: "ypbTugX", axis: "X", ratio: 1 },
                 { type: "translate", value: "ypbTugY", axis: "Y", ratio: 1 },
-                { type: "translate", value: "ypbTugZ", axis: "Z", ratio: 1 },   // height tuning / pitch compensation
-                { type: "rotate", value: "ypbTugYaw", axis: "Z", ratio: 1 },   // steering (degrees)
+                { type: "translate", value: "ypbTugZ", axis: "Z", ratio: 1 },
+                { type: "rotate", value: "ypbTugYaw", axis: "Z", ratio: 1 },
                 { type: "show", value: "ypbTug" },
-                { type: "rotate", value: "atilt", axis: "X", ratio: -1 }   // keeps the tug level when the nose dips
+                { type: "rotate", value: "atilt", axis: "X", ratio: -1 }
             ]
-
         };
 
         geofs.animation.values.ypbTug = 1;
@@ -5250,7 +4822,6 @@ function addTug() {
         console.log("[Y Pushback] Tug added (aircraft id " + aircraft().id + ", right/forward/up = " +
             place.pos.map(function (v) { return Number(v).toFixed(1); }).join(" / ") + ", from " + place.source + ")");
     } catch (e) {
-
         console.warn("[Y Pushback] Could not add the tug:", e);
     }
 }
@@ -5278,8 +4849,8 @@ function removeTug() {
 // ============================================================
 
 const PROMO_ENABLED = true;
-const PROMO_INTERVAL_MS = 5 * 60 * 1000;   // shows every 5 minutes
-const PROMO_VISIBLE_MS = 15 * 1000;        // stays on screen for 15 seconds
+const PROMO_INTERVAL_MS = 5 * 60 * 1000;
+const PROMO_VISIBLE_MS = 15 * 1000;
 const PROMO_URL = "https://geofs.fandom.com/wiki/Elegance_Airways";
 const PROMO_LOGO = "https://raw.githubusercontent.com/TAFTUGSSTUDIO/GeoDraw/main/Elegance_AIrways_Logo_.png";
 
@@ -5324,13 +4895,11 @@ function createPromo() {
         <div class="ypb-promo-sub">Click to visit our page</div>
     `;
 
-    // Click on the pop-up = open the page
     promoEl.addEventListener("click", function () {
         window.open(PROMO_URL, "_blank", "noopener");
         hidePromo();
     });
 
-    // X button = just close (don't open the link)
     promoEl.querySelector(".ypb-promo-x").addEventListener("click", function (e) {
         e.stopPropagation();
         hidePromo();
@@ -5344,7 +4913,6 @@ function showPromo() {
     clearTimeout(promoHideTimer);
 
     promoEl.style.display = "block";
-    // next frame so the fade/slide-in transition runs
     requestAnimationFrame(function () { promoEl.classList.add("show"); });
 
     promoHideTimer = setTimeout(hidePromo, PROMO_VISIBLE_MS);
@@ -5362,7 +4930,7 @@ function hidePromo() {
 function startPromo() {
     if (!PROMO_ENABLED) return;
     createPromo();
-    setInterval(showPromo, PROMO_INTERVAL_MS);   // first pop-up after 5 min, then every 5 min
+    setInterval(showPromo, PROMO_INTERVAL_MS);
 }
 
 startPromo();
@@ -5370,7 +4938,6 @@ startPromo();
 // ============================================================
 // START
 // ============================================================
-
 
 waitForGeoFS();
 
