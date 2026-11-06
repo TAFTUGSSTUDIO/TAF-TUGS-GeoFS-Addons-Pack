@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MCP PANEL
 // @namespace    http://tampermonkey.net/
-// @version      5.2
-// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft. Tu-144 radar (РЛС) mode shows Immersive Airports ground data and multiplayer traffic. Button docks in the GeoFS bottom bar. Tu-144 КУРС selector drives the heading drum and map ring.
+// @version      5.3
+// @description  Realistic MCP/FCU for GeoFS. Layout + colours switch per aircraft. 737: working C/O, N1, V NAV and CWS A/B. Tu-144 radar (РЛС) mode shows Immersive Airports ground data and multiplayer traffic. Button docks in the GeoFS bottom bar. Tu-144 КУРС selector drives the heading drum and map ring.
 // @match        https://*.geo-fs.com/geofs.php*
 // @grant        none
 // ==/UserScript==
@@ -293,6 +293,7 @@
                   '7': 'abc', '8': 'abcdefg', '9': 'abcdfg', '-': 'g', ' ': '' };
 
     function digit(ch) {
+        if (ch === '.') return '<svg class="dg" style="width:9px" viewBox="0 0 9 33"><circle class="on" cx="4.5" cy="30" r="2.6"/></svg>';
         let inner;
         if (ch === '+') {
             inner = Object.keys(SEGS).map(k => `<path class="off" d="${SEGS[k]}"/>`).join('') +
@@ -1356,6 +1357,17 @@
     let bankIdx = 0, atOn = false, fdOn = true, apChannel = 'A', atAngle = 180;
     const localLit = {};
 
+    // 737 extras: C/O (knots <-> Mach), N1 mode, CWS A/B
+    let coMach = false, cws = null;
+    const n1 = { on: false }, N1_LIMIT = 0.95;
+    function machPerKt() {
+        try {
+            const v = geofs.animation.values, k = Number(v.kias), m = Number(v.mach);
+            if (k > 40 && m > 0.02) return m / k;
+        } catch (e) {}
+        return 1 / 661;
+    }
+
     const dispIds = { ias: ['disp-ias'], hdg: ['disp-hdg', 'disp-hdg2'], alt: ['disp-alt', 'disp-alt2'], vs: ['disp-vs'], crs: ['disp-crsL', 'disp-crsR'] };
     const dialIds = { ias: ['dial-ias'], hdg: ['dial-hdg', 'dial-hdg2'], alt: ['dial-alt'], crs: ['dial-crsL', 'dial-crsR'] };
     const isDrum = () => !!curTheme && curTheme.dtype === 'drum';
@@ -1363,7 +1375,10 @@
     function fmt(p) {
         const v = values[p];
         switch (p) {
-            case 'ias': return String(Math.round(v)).padStart(layout.iasW, (layout.name === 'tu144' && isDrum()) ? '0' : ' ').slice(-layout.iasW);
+            case 'ias':
+                if (coMach && layout.name === 'b737')
+                    return (v * machPerKt()).toFixed(2).replace(/^0/, '').padStart(layout.iasW, ' ').slice(-layout.iasW);
+                return String(Math.round(v)).padStart(layout.iasW, (layout.name === 'tu144' && isDrum()) ? '0' : ' ').slice(-layout.iasW);
             case 'hdg':
             case 'crs': return String(v).padStart(3, '0');
             case 'alt': return String(v).padStart(5, isDrum() ? '0' : ' ').slice(-5);
@@ -1419,6 +1434,9 @@
     }
 
     function changeValue(param, amount) {
+        // in C/O (Mach) mode on the 737, one click = about 0.01 Mach
+        if (param === 'ias' && coMach && layout.name === 'b737')
+            amount = Math.sign(amount) * Math.max(1, Math.round(0.01 / machPerKt())) * Math.max(1, Math.round(Math.abs(amount) / STEP.ias));
         if (param === 'hdg' && lnav.on) stopLNAV();
         if (param === 'vs' && flch.on) stopFLCH(false);
         const oldVal = values[param];
@@ -1523,6 +1541,7 @@
     function syncRealLamps() {
         FLCH_IDS.forEach(id => setOn(id, flch.on));
         LNAV_IDS.forEach(id => setOn(id, lnav.on));
+        setOn('btn-vnav', flch.on && lnav.on);
     }
 
     // FLCH / LVL CHG
@@ -1587,6 +1606,57 @@
         lnav.on = false;
         syncRealLamps();
     }
+
+    // C/O: IAS window knots <-> Mach
+    function toggleCO() {
+        coMach = !coMach;
+        setOn('btn-co', coMach);
+        renderDisp('ias');
+    }
+
+    // N1: autothrottle holds the climb thrust limit (needs the A/T switch up)
+    function toggleN1() {
+        if (n1.on) { stopN1(); return; }
+        if (!atOn || typeof geofs === 'undefined' || !geofs.autopilot) { flashBad(['btn-n1']); return; }
+        n1.on = true;
+        if (apModes().speed) toggleGeoFSMode('speed');   // N1 and SPEED are exclusive
+        setOn('btn-n1', true);
+    }
+    function stopN1() { n1.on = false; setOn('btn-n1', false); }
+    function n1Tick() {
+        if (!n1.on) return;
+        if (!atOn || apModes().speed) { stopN1(); return; }
+        try { geofs.controls.throttle = N1_LIMIT; } catch (e) {}
+    }
+
+    // V NAV: L NAV + level change toward the MCP altitude
+    function toggleVNAV() {
+        if (lnav.on && flch.on) { stopLNAV(); stopFLCH(false); }
+        else {
+            if (!lnav.on) toggleLNAV();
+            if (!flch.on) toggleFLCH();
+        }
+        syncRealLamps();
+    }
+
+    // CWS A/B: capture current heading + vertical speed and hold them
+    function engageCWS(ch) {
+        const id = 'btn-cws' + ch.toLowerCase();
+        const hdg = getPlaneHeading();
+        if (typeof geofs === 'undefined' || !geofs.autopilot || hdg === null) { flashBad([id]); return; }
+        let vs = 0;
+        try { vs = Math.round(Number(geofs.animation.values.verticalSpeed) / 100) * 100 || 0; } catch (e) {}
+        cws = ch; apChannel = ch;
+        stopFLCH(false); stopLNAV();
+        setVal('hdg', Math.round(hdg) % 360);
+        setVal('vs', Math.max(-6000, Math.min(6000, vs)));
+        pushValuesToGeoFS();
+        if (!apModes().heading) toggleGeoFSMode('heading');
+        if (!apModes().verticalSpeed) toggleGeoFSMode('verticalSpeed');
+        if (apModes().altitude) toggleGeoFSMode('altitude');
+        syncModeButtons();
+    }
+
     function navTick() {
         if (!flch.on && !lnav.on) return;
         if (!apOn()) { flch.on = false; lnav.on = false; syncRealLamps(); return; }
@@ -1600,10 +1670,10 @@
         else { STEP.alt = STEP.alt === 100 ? 1000 : 100; setOn('btn-altintv', STEP.alt > 100); }
     }
 
-    const INOP = ['btn-n1', 'btn-vnav', 'btn-vorloc', 'btn-app', 'btn-loc', 'btn-cwsa', 'btn-cwsb', 'btn-thr', 'btn-exped',
+    const INOP = ['btn-vorloc', 'btn-app', 'btn-loc', 'btn-thr', 'btn-exped',
                   'btn-machhold', 'btn-iasacq', 'btn-ins', 'btn-trkhdg', 'btn-backbeam', 'btn-turb', 'btn-pitchhold',
                   'btn-goaround', 'btn-land', 'btn-mach2', 'btn-maxclimb', 'btn-ias2', 'btn-glide', 'btn-maxcruise',
-                  'btn-altacq', 'btn-at2', 'btn-co', 'btn-sel', 'btn-spdmach', 'btn-hdgtrk', 'btn-metric', 'btn-truemag'];
+                  'btn-altacq', 'btn-at2', 'btn-sel', 'btn-spdmach', 'btn-hdgtrk', 'btn-metric', 'btn-truemag'];
 
     // ---- interaction
     const wheelMap = {};
@@ -1850,8 +1920,12 @@
         setOn('btn-cmda', ap.on && apChannel === 'A');
         setOn('btn-cmdb', ap.on && apChannel === 'B');
         setOn('btn-cmdc', ap.on && apChannel === 'C');
+        if (!ap.on) cws = null;
+        setOn('btn-cwsa', cws === 'A');
+        setOn('btn-cwsb', cws === 'B');
+        setOn('btn-n1', n1.on);
         syncRealLamps();
-        if (speedOn !== lastSpeedMode) { lastSpeedMode = speedOn; if (Date.now() >= atLockUntil) setAT(speedOn); }
+        if (speedOn !== lastSpeedMode) { lastSpeedMode = speedOn; if (Date.now() >= atLockUntil) setAT(speedOn || n1.on); }
     }
 
     function toggleAP(channel) {
@@ -1928,6 +2002,7 @@
                 const want = Math.abs(dy) > 6 ? dy < 0 : !atOn;
                 if (want === atOn) return;
                 setAT(want);
+                if (!want) stopN1();
                 atLockUntil = Date.now() + 1500;
                 const geoSpeed = !!(typeof geofs !== 'undefined' && geofs.autopilot && geofs.autopilot.modes && geofs.autopilot.modes.speed);
                 if (geoSpeed !== want) toggleGeoFSMode('speed');
@@ -1937,6 +2012,13 @@
 
         FLCH_IDS.forEach(id => { const e = $(id); if (e) e.addEventListener('click', toggleFLCH); });
         LNAV_IDS.forEach(id => { const e = $(id); if (e) e.addEventListener('click', toggleLNAV); });
+        const bco = $('btn-co'); if (bco) bco.addEventListener('click', toggleCO);
+        const bn1 = $('btn-n1'); if (bn1) bn1.addEventListener('click', toggleN1);
+        const bvn = $('btn-vnav'); if (bvn) bvn.addEventListener('click', toggleVNAV);
+        const bca = $('btn-cwsa'); if (bca) bca.addEventListener('click', () => engageCWS('A'));
+        const bcb = $('btn-cwsb'); if (bcb) bcb.addEventListener('click', () => engageCWS('B'));
+        setOn('btn-co', coMach);
+        setOn('btn-n1', n1.on);
         const si = $('btn-spdintv'); if (si) si.addEventListener('click', () => toggleIntv('spd'));
         const ai = $('btn-altintv'); if (ai) ai.addEventListener('click', () => toggleIntv('alt'));
         setOn('btn-spdintv', STEP.ias > 1);
@@ -2060,6 +2142,8 @@
                 } catch (err) {}
                 stopFLCH(false);
                 stopLNAV();
+                stopN1();
+                cws = null;
                 INOP.forEach(id => { localLit[id] = false; setOn(id, false); });
                 dis.classList.add('alert');
                 setTimeout(() => dis.classList.remove('alert'), 1200);
@@ -2142,6 +2226,8 @@
         updateAircraftTheme();
         updateMach();
         navTick();
+        n1Tick();
+        if (coMach) renderDisp('ias');
         applyBankLimit();
         updateScope();
         updateGauges();
