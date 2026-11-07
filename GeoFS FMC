@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoFS FMC
 // @namespace    GeoFS-FMC
-// @version      1.2
-// @description  Boeing 737-style FMC/CDU. Button docks into the GeoFS bottom bar (next to MCP PANEL). Colours change with the aircraft. Picks up a flight plan loaded in GeoFS and draws the route on the 3D globe. Pages: IDENT, POS INIT, RTE, DEP/ARR, LEGS, PROG, PERF INIT, TAKEOFF REF, APPROACH REF, THRUST LIM, VNAV, FIX, MENU and a PUSHBACK page that drives the "GeoFS Y Pushback Planner" script.
+// @version      1.3
+// @description  Boeing 737-style FMC/CDU. Button docks into the GeoFS bottom bar (next to MCP PANEL). Colours change with the aircraft. Picks up a flight plan loaded in GeoFS, has a MAP page, a one-step quick route, a built-in tutorial (FMC MENU > HELP) and shows the route on its own MAP page (nothing is drawn outside the FMC). Has a PUSHBACK page that drives the "GeoFS Y Pushback Planner" script.
 // @match        https://*.geo-fs.com/*
 // @match        https://geo-fs.com/*
 // @grant        none
@@ -37,7 +37,7 @@ style.textContent = `
 #fmc-screen .dt{height:17px;line-height:17px;font-size:14px}
 #fmc-screen .dt span:nth-child(2),#fmc-screen .lb span:nth-child(2){flex:1;text-align:center}
 #fmc-screen .scr{position:absolute;left:3px;right:3px;bottom:2px;height:22px;line-height:22px;font-size:14px;white-space:pre;overflow:hidden}
-#fmc-screen .g{color:#4dff6a}#fmc-screen .m{color:#ff5cf0}#fmc-screen .c{color:#4fe3ff}#fmc-screen .a{color:#ffb340}#fmc-screen .r{color:#ff6a5a}
+#fmc-screen .g{color:#ffffff}#fmc-screen .m{color:#ff5cf0}#fmc-screen .c{color:#4fe3ff}#fmc-screen .a{color:#ffb340}#fmc-screen .r{color:#ff6a5a}#fmc-screen .p{color:#d36bff}
 .fmc-lsk{position:absolute;width:20px;height:12px;border-radius:3px;cursor:pointer;
     background:linear-gradient(var(--k1,#3a3d41),var(--k3,#16171a));border:1px solid #050505;box-shadow:inset 0 1px 1px rgba(255,255,255,.25),0 2px 3px rgba(0,0,0,.6)}
 .fmc-lsk:active{transform:translateY(1px)}
@@ -59,6 +59,16 @@ style.textContent = `
 .fmc-toggle-tab.floating{position:fixed;bottom:0;left:calc(50% + 84px);z-index:999998;
     height:auto;line-height:normal;padding:6px 18px;border-radius:6px 6px 0 0;border-bottom:none;margin:0;
     box-shadow:0 -4px 10px rgba(0,0,0,.5)}
+#geofs-fmc-help{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:410px;max-width:92vw;max-height:82vh;overflow:auto;
+    z-index:1000001;display:none;background:rgba(10,12,15,.97);color:#fff;border:1px solid rgba(255,255,255,.25);border-radius:12px;
+    padding:16px 18px;font-family:Arial,sans-serif;font-size:13px;line-height:1.5;box-shadow:0 10px 40px rgba(0,0,0,.7)}
+#geofs-fmc-help h3{margin:0;font-size:16px}
+#geofs-fmc-help .fmc-hb{background:#20252b;color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:7px;padding:7px 14px;font:600 13px Arial;cursor:pointer;margin:4px 4px 0 0}
+#geofs-fmc-help .fmc-hb:hover{background:#2f3740}
+#geofs-fmc-help .fmc-hb.g{background:#1f9d55;border-color:#7de2a8}
+#geofs-fmc-help input{width:100%;box-sizing:border-box;margin:3px 0 8px;padding:7px;border-radius:6px;border:1px solid #556;background:#0b0d10;color:#fff;font:14px 'Courier New',monospace;text-transform:uppercase}
+#geofs-fmc-help .note{background:#1a2a1d;border-left:3px solid #4dff6a;padding:6px 9px;margin:8px 0;border-radius:4px}
+#geofs-fmc-help code{background:#222a33;padding:1px 5px;border-radius:4px}
 `;
 document.head.appendChild(style);
 
@@ -102,8 +112,10 @@ tab.addEventListener('click', function () {
         container.style.top = Math.max(10, window.innerHeight - 560) + 'px';
     }
     if (show) render();
+    if (show && !helpSeen()) { st.msg = 'NEW? MENU > HELP / TUTORIAL'; render(); }
 });
 
+function helpSeen() { try { return localStorage.getItem('geofs-fmc-help-seen') === '1'; } catch (e) { return true; } }
 // ---- screen, LSKs, keys
 let html = '<div id="fmc-screen"></div>';
 for (let i = 0; i < 6; i++) {
@@ -114,7 +126,7 @@ for (let i = 0; i < 6; i++) {
 const FN = [
     [['INIT<br>REF', 'INITREF'], ['RTE', 'RTE'], ['DEP<br>ARR', 'DEPARR'], ['ATC', 'ATC'], ['VNAV', 'VNAV']],
     [['FIX', 'FIX'], ['LEGS', 'LEGS'], ['HOLD', 'HOLD'], ['FMC<br>COMM', 'COMM'], ['PROG', 'PROG'], ['EXEC', 'EXEC']],
-    [['MENU', 'MENU'], ['N1<br>LIMIT', 'N1'], ['PREV<br>PAGE', 'PREV'], ['NEXT<br>PAGE', 'NEXT']]
+    [['MENU', 'MENU'], ['N1<br>LIMIT', 'N1'], ['PREV<br>PAGE', 'PREV'], ['NEXT<br>PAGE', 'NEXT'], ['MAP', 'MAP']]
 ];
 FN.forEach(function (r, ri) {
     r.forEach(function (k, ci) {
@@ -145,8 +157,8 @@ const screen = $('fmc-screen');
 function shade(hex, f) {
     const n = parseInt(hex.slice(1), 16);
     let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-    const t = f < 0 ? 0 : 255, p = Math.abs(f);
-    r = Math.round(r + (t - r) * p); g = Math.round(g + (t - g) * p); b = Math.round(b + (t - b) * p);
+    const tt = f < 0 ? 0 : 255, pp = Math.abs(f);
+    r = Math.round(r + (tt - r) * pp); g = Math.round(g + (tt - g) * pp); b = Math.round(b + (tt - b) * pp);
     return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 // bg = housing, bd = housing edge, key = dark function keys, pad = letter/number keys, pt = pad text, scr = screen text tint
@@ -199,13 +211,13 @@ const FTH_RULES = [
     [/cessna|piper|\bc-?1[0-9]{2}\b|\bpa-?\d|cherokee|warrior|archer|seneca|mooney|aeronca|stearman|champ|taylorcraft|\brobin/, 'GA_TAN']
 ];
 
-function applyFmcTheme(t) {
+function applyFmcTheme(th) {
     const v = {
-        '--hb1': shade(t.bg, 0.08), '--hb2': shade(t.bg, -0.35), '--bd': t.bd,
-        '--k1': shade(t.key, 0.18), '--k2': shade(t.key, -0.4), '--k3': shade(t.key, -0.6), '--kt': '#f2f2f2',
-        '--p1': shade(t.pad, 0.1), '--p2': shade(t.pad, -0.25), '--p3': shade(t.pad, -0.4), '--pt': t.pt,
-        '--scr': t.scr, '--sbd': shade(t.bd, -0.3), '--sbd2': shade(t.bg, -0.2), '--lt': shade(t.bg, 0.65),
-        '--tbg': t.bd, '--tbd': t.bg, '--ttx': '#f3f3f3'
+        '--hb1': shade(th.bg, 0.08), '--hb2': shade(th.bg, -0.35), '--bd': th.bd,
+        '--k1': shade(th.key, 0.18), '--k2': shade(th.key, -0.4), '--k3': shade(th.key, -0.6), '--kt': '#f2f2f2',
+        '--p1': shade(th.pad, 0.1), '--p2': shade(th.pad, -0.25), '--p3': shade(th.pad, -0.4), '--pt': th.pt,
+        '--scr': th.scr, '--sbd': shade(th.bd, -0.3), '--sbd2': shade(th.bg, -0.2), '--lt': shade(th.bg, 0.65),
+        '--tbg': th.bd, '--tbd': th.bg, '--ttx': '#f3f3f3'
     };
     Object.keys(v).forEach(function (k) {
         container.style.setProperty(k, v[k]);
@@ -223,11 +235,11 @@ function updateAircraftTheme() {
         if (id === curAcId) return;
         curAcId = id;
         const name = String((inst.aircraftRecord && inst.aircraftRecord.name) || inst.name || '').toLowerCase();
-        let t = FTH.DEFAULT;
+        let th = FTH.DEFAULT;
         for (let i = 0; i < FTH_RULES.length; i++) {
-            if (FTH_RULES[i][0].test(name)) { t = FTH[FTH_RULES[i][1]]; break; }
+            if (FTH_RULES[i][0].test(name)) { th = FTH[FTH_RULES[i][1]]; break; }
         }
-        applyFmcTheme(t);
+        applyFmcTheme(th);
     } catch (e) {}
 }
 
@@ -287,6 +299,35 @@ let wptN = 0;
 const tmpFix = {};      // points that came from a flight plan loaded in GeoFS (not saved)
 const validLL = function (f) { return Math.abs(f.lat) <= 90 && Math.abs(f.lon) <= 180; };
 
+const BUILTIN_APT = {ENGM:[60.1939,11.1004],ENBR:[60.2934,5.2181],ENZV:[58.8767,5.6378],ENVA:[63.4578,10.924],ENTC:[69.6833,18.9189],ENBO:[67.2692,14.3653],ENHD:[59.3453,5.2086],ENKB:[63.1118,7.8245],ENAL:[62.56,6.11],ENTO:[59.1867,10.2586],ENRY:[59.3789,10.7855],ENCN:[58.2042,8.0854],ENSB:[78.2461,15.4656],ENEV:[68.4913,16.6781],ENSO:[59.7919,5.3408],ENFL:[61.5836,5.0247],ENML:[62.7447,7.2625],ENLK:[68.1526,13.6094],ENAT:[69.9761,23.3717],ENKR:[69.7258,29.8913],ENDU:[69.0558,18.5404],ENLI:[58.0997,6.626],ENBN:[65.4611,12.2175],EGLL:[51.4706,-0.4619],EGKK:[51.1481,-0.1903],EGCC:[53.3537,-2.275],EHAM:[52.3086,4.7639],EDDF:[50.0333,8.5706],EDDM:[48.3538,11.7861],LFPG:[49.0097,2.5479],LEMD:[40.4719,-3.5626],LEBL:[41.2971,2.0785],LIRF:[41.8003,12.2389],LSZH:[47.4647,8.5492],LOWW:[48.1103,16.5697],EKCH:[55.618,12.656],ESSA:[59.6519,17.9186],EFHK:[60.3172,24.9633],BIKF:[63.985,-22.6056],EIDW:[53.4213,-6.2701],EBBR:[50.9014,4.4844],LPPT:[38.7813,-9.1359],LTFM:[41.2753,28.7519],UUEE:[55.9726,37.4146],OMDB:[25.2528,55.3644],OTHH:[25.2731,51.6081],VHHH:[22.308,113.9185],RJTT:[35.5523,139.7798],RJAA:[35.7647,140.3864],RKSI:[37.4602,126.4407],WSSS:[1.3644,103.9915],YSSY:[-33.9461,151.1772],NZAA:[-37.0082,174.785],KJFK:[40.6398,-73.7789],KLAX:[33.9425,-118.4081],KSFO:[37.619,-122.375],KORD:[41.9786,-87.9048],KATL:[33.6367,-84.4281],KDFW:[32.8968,-97.038],KMIA:[25.7959,-80.287],KSEA:[47.4502,-122.3088],KBOS:[42.3643,-71.0052],KLAS:[36.084,-115.1537],KDEN:[39.8561,-104.6737],CYYZ:[43.6777,-79.6248],SBGR:[-23.4356,-46.4731],FAOR:[-26.1392,28.246],HECA:[30.1219,31.4056]};
+let aptCache = null, aptCacheT = 0;
+function allAirports() {
+    const out = [], seen = {};
+    function add(id, la, lo) {
+        id = String(id).toUpperCase(); la = Number(la); lo = Number(lo);
+        if (seen[id] || !/^[A-Z0-9]{3,4}$/.test(id) || !isFinite(la) || !isFinite(lo)) return;
+        seen[id] = 1; out.push({ id: id, lat: la, lon: lo });
+    }
+    try {
+        const ap = geofs.mainAirportList;
+        if (Array.isArray(ap)) ap.forEach(function (a) { if (Array.isArray(a)) add(a[0], a[1], a[2]); else if (a && a.icao) add(a.icao, a.lat, a.lon); });
+        else if (ap) Object.keys(ap).forEach(function (k) {
+            const v = ap[k];
+            if (Array.isArray(v)) add(k, v[0], v[1]); else if (v && isFinite(v.lat)) add(k, v.lat, v.lon !== undefined ? v.lon : v.lng);
+        });
+    } catch (e) {}
+    Object.keys(BUILTIN_APT).forEach(function (k) { add(k, BUILTIN_APT[k][0], BUILTIN_APT[k][1]); });
+    return out;
+}
+function aptIndex() {
+    const now = Date.now();
+    if (!aptCache || now - aptCacheT > 30000) {
+        aptCache = {}; aptCacheT = now;
+        allAirports().forEach(function (a) { aptCache[a.id] = a; });
+    }
+    return aptCache;
+}
+
 function lookupFix(raw) {
     const s = String(raw).toUpperCase().trim();
     let m;
@@ -329,6 +370,8 @@ function lookupFix(raw) {
             }
         }
     } catch (e) {}
+    const apx = aptIndex()[s];
+    if (apx) return apx;
     return null;
 }
 
@@ -340,7 +383,7 @@ const st = {
     dep: { rwy: '', sid: '' }, arr: { star: '', appr: '', rwy: '' },
     zfw: 0, fuel: 0, resv: 0, ci: '', crz: 0,
     flaps: 0, v1: 0, vr: 0, v2: 0, derate: 0, appFlaps: 30,
-    clbSpd: 280, crzMach: 0.78, desSpd: 280, fixId: ''
+    clbSpd: 280, crzMach: 0.78, desSpd: 280, fixId: '', mapRange: 0, show3d: true
 };
 
 const BOX = '□□□□', DASH = '-----';
@@ -404,6 +447,24 @@ function progCalc() {
     return { p: p, nxt: nxt, dn: dn, dd: dd, dp: dp };
 }
 
+// whole path = route waypoints + destination airport (if it is not already the last waypoint)
+function fullRoute() {
+    const R = st.route.slice();
+    const dp = resolveDest();
+    if (dp && (!R.length || R[R.length - 1].id !== dp.id)) R.push({ id: dp.id, lat: dp.lat, lon: dp.lon, via: 'DIRECT' });
+    return R;
+}
+function ensureDest() {
+    const dp = resolveDest();
+    if (dp && (!st.route.length || st.route[st.route.length - 1].id !== dp.id)) st.route.push({ id: dp.id, lat: dp.lat, lon: dp.lon, via: 'DIRECT' });
+}
+function pathPts() {
+    const out = [], o = st.origin ? lookupFix(st.origin) : null;
+    if (o) out.push({ id: o.id, lat: o.lat, lon: o.lon });
+    fullRoute().forEach(function (w) { out.push(w); });
+    return out;
+}
+
 // ------------------------------------------------------------------ GeoFS flight plan <-> FMC route
 // Reading: a plan loaded in GeoFS (flight plan panel / file) is imported into the FMC route.
 // Writing: EXEC / SYNC LNAV pushes the FMC route into GeoFS's plan (so MCP L NAV can follow it).
@@ -461,27 +522,83 @@ function importGeo() {
     drawPath(true);
     return true;
 }
+// manual "IMPORT GEOFS" key: returns -1 (no plan), 0 (empty plan) or the number of waypoints now in the route
+function importGeofs() {
+    const a = geoPlanArray();
+    if (!a) return -1;
+    if (!normGeo(a).length) return 0;
+    lastGeoSig = '';
+    importGeo();
+    return st.route.length;
+}
 
-// push the FMC route into GeoFS's own flight plan (so the MCP L NAV button can follow it) and redraw - best effort
-function syncGeofs() {
+// push the FMC route into GeoFS's own flight plan (so the MCP L NAV button can follow it) - best effort
+function syncGeofs(empty) {
+    const pts = empty ? [] : fullRoute();
     try {
         const fp = geofs.flightPlan;
-        const arr = fp && fp.waypointArray;
-        if (!Array.isArray(arr)) { drawPath(true); return false; }
-        arr.length = 0;
-        st.route.forEach(function (w) {
-            arr.push({ lat: w.lat, lon: w.lon, ident: w.id, type: 'FMC', alt: w.alt || undefined, spd: w.spd || undefined });
+        if (!fp) { drawPath(true); return false; }
+        try {   // try GeoFS's own functions first
+            if (typeof fp.clear === 'function' && typeof fp.addWaypoint === 'function') {
+                fp.clear();
+                pts.forEach(function (w) { fp.addWaypoint(w.lat, w.lon, w.alt || undefined, w.spd || undefined); });
+            }
+        } catch (e) {}
+        let arr = fp.waypointArray;
+        const ok = Array.isArray(arr) && arr.length === pts.length && pts.every(function (w, i) {
+            return arr[i] && Math.abs(Number(arr[i].lat) - w.lat) < 0.01 && Math.abs(Number(arr[i].lon) - w.lon) < 0.01;
         });
-        const dp = resolveDest();
-        if (dp) arr.push({ lat: dp.lat, lon: dp.lon, ident: st.dest, type: 'FMC' });
-        lastGeoSig = geoSig(normGeo(arr));          // so we don't re-import our own plan
-        ['refreshWaypoints', 'updatePath', 'draw', 'refresh', 'update'].forEach(function (fn) {
-            try { if (typeof fp[fn] === 'function') fp[fn](); } catch (e) {}
+        if (!ok) {   // otherwise fill the array ourselves
+            if (!Array.isArray(arr)) { fp.waypointArray = []; arr = fp.waypointArray; }
+            arr.length = 0;
+            pts.forEach(function (w) { arr.push({ lat: w.lat, lon: w.lon, ident: w.id, type: 'FMC', alt: w.alt || undefined, spd: w.spd || undefined }); });
+        }
+        ['refreshWaypoints', 'updatePath', 'draw', 'refresh', 'update', 'redraw'].forEach(function (n) {
+            try { if (typeof fp[n] === 'function') fp[n](); } catch (e) {}
         });
+        lastGeoSig = geoSig(normGeo(fp.waypointArray || arr));   // so we don't re-import our own plan
         drawPath(true);
         return true;
     } catch (e) { drawPath(true); return false; }
 }
+function clearRoute() {
+    st.route = []; st.origin = ''; st.dest = ''; st.active = false; st.exec = false;
+}
+
+// the route is NOT drawn on the 3D globe any more - it is only shown inside the FMC (MAP page)
+function drawPath() {}
+function draw3D() {}
+
+function nearestApt() {
+    const p = me();
+    if (!p) return null;
+    let best = null, bd = 1e9;
+    allAirports().forEach(function (a) { const d = distNm(p, a); if (d < bd) { bd = d; best = a; } });
+    return best && bd < 40 ? best : null;
+}
+// one-step route for new players: nearest airport -> (optional waypoints) -> destination
+function quickRoute(destStr, viaStr) {
+    const d = lookupFix(destStr || '');
+    if (!d) return { ok: false, text: 'Destination "' + esc(destStr || '') + '" not found. Use a 4-letter airport code like ENBR.' };
+    const vias = [], names = String(viaStr || '').split(/[\s,]+/).filter(Boolean);
+    for (let i = 0; i < names.length; i++) {
+        const f = lookupFix(names[i]);
+        if (!f) return { ok: false, text: 'Waypoint "' + esc(names[i]) + '" not found. Leave it empty, or type NAME/lat/lon.' };
+        vias.push({ id: f.id, lat: f.lat, lon: f.lon, via: 'DIRECT' });
+    }
+    const o = nearestApt();
+    if (o) { st.origin = o.id; if (!st.refApt) st.refApt = o.id; }
+    st.dest = d.id; st.route = vias; ensureDest();
+    st.exec = false; st.active = true;
+    const p = me();
+    let total = 0;
+    if (p) { let prev = p; st.route.forEach(function (w) { total += distNm(prev, w); prev = w; }); }
+    if (!st.crz) st.crz = total < 60 ? 6000 : total < 150 ? 14000 : total < 300 ? 24000 : total < 600 ? 33000 : 37000;
+    go('MAP');
+    return { ok: true, text: '✅ Route made: <b>' + (o ? o.id : 'your position') + ' → ' + st.route.map(function (w) { return w.id; }).join(' → ') +
+        '</b> (' + Math.round(total) + ' NM, cruise ' + fmtAlt(st.crz) + ').<br>It is shown on the FMC <b>MAP</b> page only - nothing is drawn outside the FMC.<br>To let the MCP fly it, see step 4.' };
+}
+
 // set a value on the MCP panel (the MCP script reads geofs.autopilot every 200 ms)
 function toMCP(key, v) {
     try {
@@ -491,60 +608,6 @@ function toMCP(key, v) {
         if (ap.values) ap.values[key] = v;
         return true;
     } catch (e) { return false; }
-}
-
-// ------------------------------------------------------------------ flight path overlay (3D view)
-let pathEnts = [], pathSig = '';
-function cesiumViewer() {
-    try { return (typeof Cesium !== 'undefined' && geofs.api && geofs.api.viewer) || null; } catch (e) { return null; }
-}
-function clearPath() {
-    const v = cesiumViewer();
-    if (v) pathEnts.forEach(function (e) { try { v.entities.remove(e); } catch (x) {} });
-    pathEnts = [];
-}
-function drawPath(force) {
-    const v = cesiumViewer();
-    if (!v) return;
-    const pts = [];
-    const o = st.origin ? lookupFix(st.origin) : null;
-    if (o) pts.push({ id: o.id, lat: o.lat, lon: o.lon });
-    st.route.forEach(function (w) { pts.push({ id: w.id, lat: w.lat, lon: w.lon }); });
-    const d = resolveDest();
-    if (d) pts.push({ id: st.dest, lat: d.lat, lon: d.lon });
-    if (pts.length < 2) { if (pathEnts.length) { clearPath(); } pathSig = ''; return; }
-    const sig = (st.active ? 'A' : 'M') + pts.map(function (p) { return p.id + p.lat + p.lon; }).join(';');
-    if (!force && sig === pathSig) return;
-    pathSig = sig;
-    clearPath();
-    const col = st.active ? Cesium.Color.MAGENTA : Cesium.Color.CYAN;
-    const flat = [];
-    pts.forEach(function (p) { flat.push(p.lon, p.lat); });
-    try {
-        pathEnts.push(v.entities.add({
-            polyline: {
-                positions: Cesium.Cartesian3.fromDegreesArray(flat),
-                width: 4,
-                clampToGround: true,
-                material: col.withAlpha(0.9)
-            }
-        }));
-    } catch (e) { console.warn('[GeoFS FMC] path line failed', e); }
-    pts.forEach(function (p) {
-        try {
-            pathEnts.push(v.entities.add({
-                position: Cesium.Cartesian3.fromDegrees(p.lon, p.lat),
-                point: { pixelSize: 8, color: col, heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                         disableDepthTestDistance: Number.POSITIVE_INFINITY },
-                label: {
-                    text: p.id, font: '13px monospace', fillColor: Cesium.Color.WHITE,
-                    outlineColor: Cesium.Color.BLACK, outlineWidth: 3, style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-                    pixelOffset: new Cesium.Cartesian2(0, -16), heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
-                    disableDepthTestDistance: Number.POSITIVE_INFINITY
-                }
-            }));
-        } catch (e) { console.warn('[GeoFS FMC] path point failed', e); }
-    });
 }
 
 // ------------------------------------------------------------------ approx performance
@@ -591,9 +654,13 @@ PAGES.MENU = function () {
         title: 'MENU', rows: fill([
             row('', '<FMC', '', 'REQUEST', { rc: 'a' }),
             row('', '<ACARS'),
-            row('', '<PUSHBACK')
+            row('', '<PUSHBACK', '', '', { lc: 'g' }),
+            row('', '<ROUTE MAP', '', '', { lc: 'g' }),
+            blank(),
+            row('', '<HELP / TUTORIAL', '', '', { lc: 'p' })
         ]),
-        L: [function () { go('IDENT'); }, function () { err('ACARS NOT AVAILABLE'); }, function () { go('PUSHBACK'); }], R: []
+        L: [function () { go('IDENT'); }, function () { err('ACARS NOT AVAILABLE'); }, function () { go('PUSHBACK'); },
+            function () { go('MAP'); }, , function () { toggleHelp(true); }], R: []
     };
 };
 
@@ -603,7 +670,7 @@ PAGES.IDENT = function () {
             row('MODEL', acModel(), 'ENG RATING', '26K'),
             row('NAV DATA', 'GEOFS DB', 'ACTIVE', 'BUILT-IN'),
             blank(),
-            row('OP PROGRAM', 'FMC-MCP 1.2'),
+            row('OP PROGRAM', 'FMC-MCP 1.3'),
             blank(),
             row('', '<INDEX', '', 'POS INIT>')
         ]),
@@ -669,7 +736,9 @@ PAGES.RTE = function () {
         rows = fill([
             row('ORIGIN', st.origin || BOX, 'DEST', st.dest || BOX, { lc: 'g', rc: 'g' }),
             row('FLT NO', st.flt || DASH, 'CO ROUTE', st.coRte || DASH),
-            blank(), blank(), blank(),
+            row('', '<ROUTE MAP', '', 'CLEAR ROUTE>', { lc: 'g', rc: 'a' }),
+            row('', '<IMPORT GEOFS'),
+            row('', '<HELP / TUTORIAL', '', '', { lc: 'p' }),
             row('', '<INDEX', '', st.active ? 'LEGS>' : 'ACTIVATE>', { rc: st.active ? '' : 'g' })
         ]);
         const icao = function (s) { return /^[A-Z]{4}$/.test(s) ? s : null; };
@@ -677,6 +746,10 @@ PAGES.RTE = function () {
         R[0] = edit(function () { return st.dest; }, function (v) { st.dest = v || ''; }, icao, true);
         L[1] = edit(function () { return st.flt; }, function (v) { st.flt = v || ''; }, function (s) { return /^[A-Z0-9]{1,8}$/.test(s) ? s : null; });
         R[1] = edit(function () { return st.coRte; }, function (v) { st.coRte = v || ''; }, function (s) { return /^[A-Z0-9]{1,10}$/.test(s) ? s : null; });
+        L[2] = function () { go('MAP'); };
+        R[2] = function () { clearRoute(); err('ROUTE CLEARED'); };
+        L[3] = function () { const n = importGeofs(); err(n < 0 ? 'NO GEOFS FLIGHT PLAN' : (n ? 'IMPORTED ' + n + ' WPTS' : 'GEOFS PLAN IS EMPTY')); };
+        L[4] = function () { toggleHelp(true); };
         L[5] = function () { go('INDEX'); };
         R[5] = function () { if (st.active) go('LEGS'); else st.exec = true; };
     } else {
@@ -799,7 +872,7 @@ PAGES.LEGS = function () {
     }
     rows.push(row('', '<RTE', '', 'SYNC LNAV>', { rc: 'g' }));
     L[5] = function () { go('RTE'); };
-    Rr[5] = function () { err(syncGeofs() ? 'SENT TO GEOFS PLAN' : 'GEOFS PLAN NOT AVAILABLE'); };
+    Rr[5] = function () { ensureDest(); const ok = syncGeofs(); st.active = true; err(ok ? 'SENT TO GEOFS FOR MCP L NAV' : 'GEOFS PLAN NOT AVAILABLE'); };
     return { title: (st.active ? 'ACT ' : 'MOD ') + 'RTE 1 LEGS', pages: pages, rows: rows, L: L, R: Rr };
 };
 
@@ -955,6 +1028,53 @@ PAGES.FIX = function () {
     };
 };
 
+const MAP_RANGES = [0, 10, 20, 40, 80, 160, 320];
+PAGES.MAP = function () {
+    const p = me(), hh = hdgNow() || 0, pts = pathPts();
+    const cx = 104, cy = 66, R = 50;
+    let range = MAP_RANGES[st.mapRange];
+    if (!range) {
+        let m = 15;
+        if (p) pts.forEach(function (q) { m = Math.max(m, distNm(p, q) * 1.15); });
+        range = MAP_RANGES.slice(1).find(function (r) { return r >= m; }) || 320;
+    }
+    let svg = '<svg width="208" height="112" viewBox="0 0 208 112" style="display:block"><defs><clipPath id="fmcmc"><rect width="208" height="112"/></clipPath></defs><g clip-path="url(#fmcmc)">';
+    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="#8a8a8a" stroke-dasharray="3 3"/>';
+    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (R / 2) + '" fill="none" stroke="#5e5e5e" stroke-dasharray="2 4"/>';
+    if (!p) {
+        svg += '<text x="104" y="60" text-anchor="middle" fill="#ffb340" font-size="11">NO POSITION</text>';
+    } else {
+        const k = R / range, h = hh * Math.PI / 180, cH = Math.cos(h), sH = Math.sin(h), ls = 60 * Math.cos(rad(p.lat));
+        const proj = function (q) {
+            const e = (q.lon - p.lon) * ls, n = (q.lat - p.lat) * 60;
+            return [cx + (e * cH - n * sH) * k, cy - (e * sH + n * cH) * k];
+        };
+        const xy = pts.map(proj);
+        if (xy.length > 1) svg += '<polyline fill="none" stroke="#ff5cf0" stroke-width="2" points="' + xy.map(function (q) { return q[0].toFixed(1) + ',' + q[1].toFixed(1); }).join(' ') + '"/>';
+        const c = progCalc();
+        if (c && c.nxt) { const q = proj(c.nxt); svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + q[0].toFixed(1) + '" y2="' + q[1].toFixed(1) + '" stroke="#fff" stroke-width="1" stroke-dasharray="4 3"/>'; }
+        pts.forEach(function (w, i) {
+            const q = xy[i];
+            svg += '<path d="M' + q[0].toFixed(1) + ',' + (q[1] - 3.5).toFixed(1) + ' l3.5,3.5 l-3.5,3.5 l-3.5,-3.5z" fill="#ff5cf0"/>' +
+                '<text x="' + (q[0] + 5).toFixed(1) + '" y="' + (q[1] - 3).toFixed(1) + '" font-size="8" font-family="Courier New" font-weight="bold" fill="#4fe3ff">' + esc(w.id) + '</text>';
+        });
+    }
+    svg += '<path d="M104,59 L109,73 L104,69 L99,73Z" fill="#fff" stroke="#000" stroke-width=".6"/>';
+    svg += '<text x="3" y="9" font-size="8" fill="#ffffff" font-family="Courier New">TRK UP</text>';
+    svg += '<text x="205" y="9" font-size="8" text-anchor="end" fill="#ffffff" font-family="Courier New">' + range + 'NM</text>';
+    if (!pts.length) svg += '<text x="104" y="100" text-anchor="middle" font-size="9" fill="#ffb340" font-family="Courier New">NO ROUTE YET - MENU > HELP</text>';
+    svg += '</g></svg>';
+    return {
+        title: (st.active ? 'ACT ' : '') + 'ROUTE MAP', raw: svg,
+        rows: [blank(), blank(), blank(), blank(),
+            row('RANGE ' + (MAP_RANGES[st.mapRange] ? '' : 'AUTO ') + range + 'NM', '<RANGE -', '', 'RANGE +>'),
+            row('', '<RTE', '', 'LEGS>')],
+        L: [, , , , function () { st.mapRange = Math.max(0, st.mapRange - 1); }, function () { go('RTE'); }],
+        R: [, , , , function () { st.mapRange = Math.min(MAP_RANGES.length - 1, st.mapRange + 1); },
+            function () { go('LEGS'); }]
+    };
+};
+
 PAGES.NA = function () {
     return {
         title: st.na || '', rows: fill([blank(), blank(), row('', '', '', '', { c: 'NOT AVAILABLE', cc: 'a' }),
@@ -1025,7 +1145,8 @@ function render() {
     curDef = def;
     const pg = (def.pages && def.pages > 1) ? (st.sub + 1) + '/' + def.pages : '';
     let h = '<div class="ttl">' + esc(def.title) + (pg ? '<i>' + pg + '</i>' : '') + '</div>';
-    def.rows.forEach(function (r) {
+    if (def.raw) h += '<div style="height:112px">' + def.raw + '</div>';
+    (def.raw ? def.rows.slice(4) : def.rows).forEach(function (r) {
         h += '<div class="lb">' + sp(r.ll) + sp('') + sp(r.rl) + '</div>';
         h += '<div class="dt">' + sp(r.l, r.lc) + sp(r.c, r.cc) + sp(r.r, r.rc) + '</div>';
     });
@@ -1049,14 +1170,16 @@ function press(k) {
         case 'PROG': go('PROG'); return;
         case 'MENU': go('MENU'); return;
         case 'N1': go('N1'); return;
+        case 'MAP': go('MAP'); return;
         case 'ATC': st.na = 'ATC'; go('NA'); return;
         case 'HOLD': st.na = 'HOLD'; go('NA'); return;
         case 'COMM': st.na = 'FMC COMM'; go('NA'); return;
         case 'EXEC':
-            if (st.exec) {
+            if (st.exec || st.route.length) {
+                ensureDest();
                 st.exec = false;
                 st.active = true;
-                if (st.route.length) syncGeofs();
+                err('ROUTE ACTIVE');
             }
             render(); return;
         case 'PREV':
@@ -1090,7 +1213,6 @@ function pressLSK(side, i) {
 }
 
 let clrTimer = null;
-let drag = null;
 container.addEventListener('mousedown', function (e) {
     const k = e.target.closest('.fmc-k'), l = e.target.closest('.fmc-lsk');
     if (k) {
@@ -1110,6 +1232,7 @@ window.addEventListener('mouseup', function () {
     if (clrTimer) { clearTimeout(clrTimer); clrTimer = null; }
     drag = null;
 });
+let drag = null;
 window.addEventListener('mousemove', function (e) {
     if (!drag) return;
     container.style.left = (e.clientX - drag.x) + 'px';
@@ -1127,6 +1250,7 @@ let hover = false;
 container.addEventListener('mouseenter', function () { hover = true; });
 container.addEventListener('mouseleave', function () { hover = false; });
 window.addEventListener('keydown', function (e) {
+    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
     if (!hover || container.style.display !== 'block') return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const k = e.key;
@@ -1145,14 +1269,100 @@ window.addEventListener('keydown', function (e) {
     press(out);
 }, true);
 
-// live pages refresh themselves; the flight plan is imported and the path overlay kept in sync even when the FMC is hidden
+// live pages refresh themselves
+// live pages refresh themselves; the flight plan is imported and the route layer kept in sync even when the FMC is hidden
 setInterval(function () {
     updateAircraftTheme();
     const imported = importGeo();
     drawPath();
     if (container.style.display !== 'block') return;
-    if (imported || ['PROG', 'LEGS', 'POSINIT', 'PUSHBACK', 'VNAV', 'FIX'].indexOf(st.page) >= 0) render();
+    if (imported || ['PROG', 'LEGS', 'POSINIT', 'PUSHBACK', 'VNAV', 'FIX', 'MAP'].indexOf(st.page) >= 0) render();
 }, 500);
+
+// ------------------------------------------------------------------ HELP / TUTORIAL
+const helpEl = document.createElement('div');
+helpEl.id = 'geofs-fmc-help';
+document.body.appendChild(helpEl);
+['keydown', 'keyup', 'keypress'].forEach(function (n) { helpEl.addEventListener(n, function (e) { e.stopPropagation(); }); });
+
+const HELP_STEPS = [
+    { t: 'Welcome 👋 (read this once)',
+      h: 'The <b>FMC</b> is the plane\'s flight computer. You tell it <b>where you want to go</b>, it makes a <b>route</b>, shows it on a map (the <code>MAP</code> key). The route is only shown <b>inside the FMC</b>.' +
+         '<div class="note">The FMC <b>plans</b>. The <b>🎛️ MCP PANEL</b> (the other tab) is what <b>flies</b> the plane along that plan.</div>' +
+         'This guide takes about 1 minute. Press <b>Next</b>.' },
+    { t: '1) Make a route (easiest way)', form: true,
+      h: 'Type where you want to go. The FMC uses the airport you are standing at as the start.' },
+    { t: '2) What the buttons do',
+      h: '• The <b>grey buttons beside the screen</b> (called LSKs) pick a line on the screen.<br>' +
+         '• Type with the keypad (or your keyboard while the mouse is over the FMC). Text appears at the <b>bottom</b>.<br>' +
+         '• Then press the grey button <b>next to the line</b> you want to fill.<br>' +
+         '• Press an LSK with an <b>empty</b> bottom line = copies that value down. <code>DEL</code> then LSK = delete it.<br>' +
+         '• <code>CLR</code> erases one letter (hold = all). <code>EXEC</code> (lights up) = confirm.<br>' +
+         '• <code>MAP</code> = see your route. <code>NEXT PAGE</code> = more pages.<br>' +
+         '• Amber text at the bottom is a message, e.g. <i>NOT IN DATA BASE</i>.',
+      go: 'MENU', gl: 'Show me the FMC menu' },
+    { t: '3) Make a route by hand',
+      h: '1. Press <code>RTE</code>.<br>2. Type your start airport (e.g. <code>ENGM</code>) and press the LSK next to <b>ORIGIN</b>.<br>' +
+         '3. Type your destination and press the LSK next to <b>DEST</b>.<br>4. <code>NEXT PAGE</code>: type a waypoint name and press the <b>right</b> LSK next to the first dashes. Repeat for more.<br>' +
+         '5. Press <code>EXEC</code> - the route becomes active (look at the <code>MAP</code> key).' +
+         '<div class="note">Your own waypoint: type <code>NAME/59.9/10.7</code> (name / latitude / longitude). Airways (like UZ707) are not supported - use waypoints.</div>',
+      go: 'RTE', gl: 'Open the RTE page' },
+    { t: '4) Fly it with the MCP panel',
+      h: '1. Open the <b>🎛️ MCP PANEL</b> tab.<br>2. Set the <b>altitude</b> with the ALT knob (or on the FMC: <code>VNAV</code> page → <b>CRZ &gt; MCP</b>).<br>' +
+         '3. On the FMC press <code>LEGS</code> → <b>SYNC LNAV&gt;</b> (hands the route to GeoFS so the MCP can follow it).<br>4. Take off, press <b>CMD</b>, then <b>L NAV</b> (or NAV) - the plane follows the route.<br>' +
+         '5. Optional: <code>INIT REF</code> → TAKEOFF → <b>V2 &gt; MCP</b> sets your takeoff speed.' +
+         '<div class="note">If the plane does not turn: check the route shows on the MAP page, that you pressed EXEC, and that you pressed SYNC LNAV.</div>',
+      go: 'MAP', gl: 'Show the route map' },
+    { t: '5) Pushback (leaving the gate)',
+      h: 'On the FMC press <code>MENU</code> → <b>PUSHBACK</b>.<br>• <b>Push back</b> or <b>Pull forward</b>, then click on the ground map to place stops.<br>• Press <b>READY / START</b>.<br>' +
+         '• Use <b>STOP</b> any time.',
+      go: 'PUSHBACK', gl: 'Open the PUSHBACK page' },
+    { t: 'Tips',
+      h: '• Drag the FMC by its grey frame. <b>Alt + mouse wheel</b> resizes it.<br>• The route is only drawn inside the FMC (MAP page), never on the 3D world.<br>' +
+         '• Waypoint not found? Use the 4-letter airport code or <code>NAME/lat/lon</code>.<br>• Come back any time: FMC <code>MENU</code> → <b>HELP / TUTORIAL</b>.' }
+];
+let helpStep = 0;
+
+function helpRender() {
+    const s = HELP_STEPS[helpStep];
+    let h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h3>' + s.t + '</h3><button class="fmc-hb" data-h="close">✕</button></div>';
+    h += '<div>' + (s.h || '') + '</div>';
+    if (s.form) {
+        h += '<div style="margin-top:10px">Destination airport (4 letters)<input id="fmc-q-dest" maxlength="4" placeholder="e.g. ENBR"></div>' +
+             '<div>Waypoints in between (optional)<input id="fmc-q-via" placeholder="e.g. ENZV  (space between names)"></div>' +
+             '<button class="fmc-hb g" data-h="quick">✈ Create my route</button><div id="fmc-q-out" style="margin-top:8px"></div>';
+    }
+    if (s.go) h += '<div style="margin-top:10px"><button class="fmc-hb g" data-h="go">' + s.gl + '</button></div>';
+    h += '<div style="margin-top:14px;display:flex;justify-content:space-between;align-items:center">' +
+         '<button class="fmc-hb" data-h="back"' + (helpStep === 0 ? ' disabled style="opacity:.4"' : '') + '>◀ Back</button>' +
+         '<span style="opacity:.7">' + (helpStep + 1) + ' / ' + HELP_STEPS.length + '</span>' +
+         '<button class="fmc-hb" data-h="' + (helpStep === HELP_STEPS.length - 1 ? 'close' : 'next') + '">' + (helpStep === HELP_STEPS.length - 1 ? 'Done ✔' : 'Next ▶') + '</button></div>';
+    helpEl.innerHTML = h;
+}
+function showFMC() { if (container.style.display !== 'block') tab.click(); }
+helpEl.addEventListener('click', function (e) {
+    const b = e.target.closest('button');
+    if (!b || b.disabled) return;
+    const a = b.dataset.h, s = HELP_STEPS[helpStep];
+    if (a === 'close') toggleHelp(false);
+    else if (a === 'next') { helpStep = Math.min(HELP_STEPS.length - 1, helpStep + 1); helpRender(); }
+    else if (a === 'back') { helpStep = Math.max(0, helpStep - 1); helpRender(); }
+    else if (a === 'go') { showFMC(); go(s.go); }
+    else if (a === 'quick') {
+        const r = quickRoute(($('fmc-q-dest') || {}).value, ($('fmc-q-via') || {}).value);
+        const out = $('fmc-q-out');
+        if (out) out.innerHTML = '<div class="note"' + (r.ok ? '' : ' style="border-color:#ff6a5a;background:#2a1a1a"') + '>' + r.text + '</div>';
+        if (r.ok) showFMC();
+    }
+});
+function toggleHelp(force) {
+    const show = force !== undefined ? force : helpEl.style.display !== 'block';
+    helpEl.style.display = show ? 'block' : 'none';
+    if (show) {
+        helpStep = 0; helpRender();
+        try { localStorage.setItem('geofs-fmc-help-seen', '1'); } catch (e) {}
+    }
+}
 
 render();
 console.log('[GeoFS FMC] ready');
